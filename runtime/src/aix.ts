@@ -34,6 +34,13 @@ export function extractAix(aixData: ArrayBuffer | Uint8Array): AixContents {
     new TextDecoder().decode(manifestData)
   );
 
+  // Normalize languages field (required in new format, but old sources may use lang)
+  if (!manifest.info.languages) {
+    // Fallback: use deprecated lang field or derive from id prefix
+    const lang = (manifest.info as { lang?: string }).lang ?? manifest.info.id.split(".")[0];
+    manifest.info.languages = lang ? [lang] : [];
+  }
+
   // Parse filters.json if present
   let filtersJson: unknown[] | undefined;
   if (filtersData) {

@@ -25,7 +25,10 @@ import type { Config } from "../config";
 export interface SourceListItem {
   id: string;
   name: string;
+  /** Primary language (first from languages array) */
   lang: string;
+  /** All supported languages */
+  languages: string[];
   version: number;
   contentRating: number;
   path: string;
@@ -58,7 +61,8 @@ export function listSources(sourcesDir: string): SourceListItem[] {
       sources.push({
         id: manifest.info.id,
         name: manifest.info.name,
-        lang: manifest.info.lang,
+        lang: manifest.info.languages[0] ?? manifest.info.id.split(".")[0],
+        languages: manifest.info.languages,
         version: manifest.info.version,
         contentRating: manifest.info.contentRating ?? ContentRating.Safe,
         path: filePath,

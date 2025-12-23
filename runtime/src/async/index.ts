@@ -129,6 +129,22 @@ export async function loadSource(
       return workerSource.hasHomeProvider();
     },
 
+    async hasListings() {
+      return workerSource.hasListings();
+    },
+
+    async isOnlySearch() {
+      return workerSource.isOnlySearch();
+    },
+
+    async handlesBasicLogin() {
+      return workerSource.handlesBasicLogin();
+    },
+
+    async handlesWebLogin() {
+      return workerSource.handlesWebLogin();
+    },
+
     async getHome() {
       return workerSource.getHome();
     },

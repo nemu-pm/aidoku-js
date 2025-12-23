@@ -37,6 +37,12 @@ export interface AsyncAidokuSource {
   getMangaListForListing(listing: Listing, page: number): Promise<MangaPageResult>;
   hasListingProvider(): Promise<boolean>;
   hasHomeProvider(): Promise<boolean>;
+  /** Has listings (static from manifest OR dynamic from WASM) */
+  hasListings(): Promise<boolean>;
+  /** onlySearch mode (no home AND no listings) */
+  isOnlySearch(): Promise<boolean>;
+  handlesBasicLogin(): Promise<boolean>;
+  handlesWebLogin(): Promise<boolean>;
   getHome(): Promise<HomeLayout | null>;
   getHomeWithPartials(onPartial: (layout: HomeLayout) => void): Promise<HomeLayout | null>;
   

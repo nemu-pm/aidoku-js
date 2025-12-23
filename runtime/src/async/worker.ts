@@ -73,6 +73,22 @@ class WorkerSource {
         settingsGetter,
       });
 
+      // Auto-default settings based on manifest config
+      const manifest = this.source.manifest;
+      if (manifest.config?.allowsBaseUrlSelect && manifest.info.urls?.length) {
+        if (!this.settings.url) {
+          this.settings.url = manifest.info.urls[0];
+        }
+      }
+      if (manifest.info.languages?.length) {
+        if (!this.settings.languages) {
+          const selectType = manifest.config?.languageSelectType ?? "single";
+          this.settings.languages = selectType === "multi"
+            ? manifest.info.languages
+            : [manifest.info.languages[0]];
+        }
+      }
+
       this.source.initialize();
 
       return {
@@ -130,7 +146,12 @@ class WorkerSource {
 
   getListings(): Listing[] {
     if (!this.source) return [];
-    return this.source.getListings();
+    // Official Aidoku: staticListings + dynamicListings (if available)
+    const staticListings = this.source.manifest.listings ?? [];
+    if (this.source.hasDynamicListings) {
+      return [...staticListings, ...this.source.getListings()];
+    }
+    return staticListings;
   }
 
   getMangaListForListing(listing: Listing, page: number): MangaPageResult {
@@ -139,11 +160,36 @@ class WorkerSource {
   }
 
   hasListingProvider(): boolean {
+    // WASM provides get_manga_list (ListingProvider trait)
     return this.source?.hasListingProvider ?? false;
+  }
+
+  hasListings(): boolean {
+    if (!this.source) return false;
+    // Official Aidoku: dynamicListings || staticListings.length > 0
+    const staticListings = this.source.manifest.listings ?? [];
+    return this.source.hasDynamicListings || staticListings.length > 0;
+  }
+
+  isOnlySearch(): boolean {
+    if (!this.source) return true;
+    // Official Aidoku: !providesHome && !hasListings
+    const hasHome = this.source.hasHome;
+    const staticListings = this.source.manifest.listings ?? [];
+    const hasListings = this.source.hasDynamicListings || staticListings.length > 0;
+    return !hasHome && !hasListings;
   }
 
   hasHomeProvider(): boolean {
     return this.source?.hasHome ?? false;
+  }
+
+  handlesBasicLogin(): boolean {
+    return this.source?.handlesBasicLogin ?? false;
+  }
+
+  handlesWebLogin(): boolean {
+    return this.source?.handlesWebLogin ?? false;
   }
 
   getHome(): HomeLayout | null {

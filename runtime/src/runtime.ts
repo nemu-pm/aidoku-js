@@ -85,6 +85,10 @@ export interface AidokuSource {
   hasListingProvider: boolean;
   /** Whether this source provides dynamic listings */
   hasDynamicListings: boolean;
+  /** Whether this source handles username/password login */
+  handlesBasicLogin: boolean;
+  /** Whether this source handles cookie-based web login */
+  handlesWebLogin: boolean;
   initialize(): void;
   getSearchMangaList(query: string | null, page: number, filters: FilterValue[]): MangaPageResult;
   getMangaDetails(manga: Manga): Manga;
@@ -267,6 +271,14 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
     | ((requestDescriptor: number) => void)
     | undefined;
 
+  // Login handlers (static detection for registry metadata)
+  const handleBasicLogin = exports.handle_basic_login as
+    | ((keyDesc: number, usernameDesc: number, passwordDesc: number) => number)
+    | undefined;
+  const handleWebLogin = exports.handle_web_login as
+    | ((keyDesc: number, cookieKeysDesc: number, cookieValsDesc: number) => number)
+    | undefined;
+
   // get_page_list with different signatures
   const wasmGetPageList = isNewAbi
     ? (exports.get_page_list as
@@ -427,6 +439,8 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
     hasHome: !!getHome,
     hasListingProvider: !!getMangaList && isNewAbi,
     hasDynamicListings: !!getListings,
+    handlesBasicLogin: !!handleBasicLogin,
+    handlesWebLogin: !!handleWebLogin,
 
     initialize() {
       if (start) {

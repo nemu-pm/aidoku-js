@@ -61,6 +61,23 @@ export async function loadSource(
     settingsGetter,
   });
 
+  // Auto-default settings based on manifest config
+  const manifest = source.manifest;
+  if (manifest.config?.allowsBaseUrlSelect && manifest.info.urls?.length) {
+    if (!currentSettings.url) {
+      currentSettings.url = manifest.info.urls[0];
+    }
+  }
+  if (manifest.info.languages?.length) {
+    if (!currentSettings.languages) {
+      // Default to first language (single select) or all (multi select)
+      const selectType = manifest.config?.languageSelectType ?? "single";
+      currentSettings.languages = selectType === "multi" 
+        ? manifest.info.languages 
+        : [manifest.info.languages[0]];
+    }
+  }
+
   source.initialize();
 
   // Subscribe to settings changes if available
@@ -98,7 +115,12 @@ export async function loadSource(
     },
 
     async getListings() {
-      return source.getListings();
+      // Official Aidoku: staticListings + dynamicListings (if available)
+      const staticListings = source.manifest.listings ?? [];
+      if (source.hasDynamicListings) {
+        return [...staticListings, ...source.getListings()];
+      }
+      return staticListings;
     },
 
     async getMangaListForListing(listing, page) {
@@ -106,11 +128,35 @@ export async function loadSource(
     },
 
     async hasListingProvider() {
+      // WASM provides get_manga_list (ListingProvider trait)
       return source.hasListingProvider;
     },
 
     async hasHomeProvider() {
+      // WASM provides get_home (Home trait)
       return source.hasHome;
+    },
+
+    async hasListings() {
+      // Official Aidoku: dynamicListings || staticListings.length > 0
+      const staticListings = source.manifest.listings ?? [];
+      return source.hasDynamicListings || staticListings.length > 0;
+    },
+
+    async isOnlySearch() {
+      // Official Aidoku: !providesHome && !hasListings
+      const hasHome = source.hasHome;
+      const staticListings = source.manifest.listings ?? [];
+      const hasListings = source.hasDynamicListings || staticListings.length > 0;
+      return !hasHome && !hasListings;
+    },
+
+    async handlesBasicLogin() {
+      return source.handlesBasicLogin;
+    },
+
+    async handlesWebLogin() {
+      return source.handlesWebLogin;
     },
 
     async getHome() {

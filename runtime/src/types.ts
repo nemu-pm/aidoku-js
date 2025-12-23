@@ -341,12 +341,18 @@ export interface MangaWithChapter {
 export interface SourceInfo {
   id: string;
   name: string;
-  lang: string;
+  /** @deprecated Use languages instead */
+  lang?: string;
+  /** Alternate names for the source */
+  altNames?: string[];
   version: number;
-  urls?: string[];
+  /** Primary URL (deprecated, use urls) */
   url?: string;
+  /** List of base URLs */
+  urls?: string[];
   contentRating?: number;
-  languages?: string[];
+  /** Languages supported by this source (ISO 639-1 codes) */
+  languages: string[];
 }
 
 /** Settings definition for user-configurable source options */
@@ -389,9 +395,20 @@ export interface SourceManifest {
   listings?: Listing[];
   filters?: FilterInfo[];
   config?: {
+    /** Whether filters are hidden during search */
     hidesFiltersWhileSearching?: boolean;
+    /** Whether author search is supported */
     supportsAuthorSearch?: boolean;
+    /** Whether artist search is supported */
+    supportsArtistSearch?: boolean;
+    /** Whether tag/genre search is supported */
     supportsTagSearch?: boolean;
+    /** Whether user can select from urls array - requires `url` setting */
+    allowsBaseUrlSelect?: boolean;
+    /** "single" or "multi" language selection - uses `languages` setting */
+    languageSelectType?: "single" | "multi";
+    /** Version that requires migration */
+    breakingChangeVersion?: number;
   };
 }
 

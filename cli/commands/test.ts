@@ -5,14 +5,22 @@ import {
   resolveAndLoadSource,
   type AsyncAidokuSource,
   type Manga,
+  type SourceManifest,
 } from "../lib/source-loader";
 import { printHeader, printJson, printListItem } from "../lib/output";
 
-async function getSource(sourceId: string): Promise<{ source: AsyncAidokuSource; name: string }> {
+function getLang(manifest: { info: { id: string; lang?: string; languages: string[] } }): string {
+  // Official Aidoku: use languages array, fall back to deprecated lang or id prefix
+  return manifest.info.languages[0] 
+    ?? manifest.info.lang 
+    ?? manifest.info.id.split(".")[0];
+}
+
+async function getSource(sourceId: string): Promise<{ source: AsyncAidokuSource; name: string; manifest: SourceManifest }> {
   const config = requireSourceConfig();
   const { source, manifest } = await resolveAndLoadSource(config, sourceId);
-  console.log(`Loaded: ${manifest.info.name} (${manifest.info.lang})\n`);
-  return { source, name: manifest.info.name };
+  console.log(`Loaded: ${manifest.info.name} (${getLang(manifest)})\n`);
+  return { source, name: manifest.info.name, manifest };
 }
 
 export const listings = buildCommand({
@@ -411,19 +419,24 @@ export const capabilities = buildCommand({
     const { source, manifest } = await resolveAndLoadSource(config, sourceId);
 
     const hasHome = await source.hasHomeProvider();
-    const hasListings = await source.hasListingProvider();
+    const hasListingProvider = await source.hasListingProvider();
+    const hasListings = await source.hasListings();
+    const isOnlySearch = await source.isOnlySearch();
     const listings = hasListings ? await source.getListings() : [];
     const filters = await source.getFilters();
-    const isOnlySearch = !hasHome && !hasListings;
+    const handlesBasicLogin = await source.handlesBasicLogin();
+    const handlesWebLogin = await source.handlesWebLogin();
 
     const caps = {
       id: manifest.info.id,
       name: manifest.info.name,
-      lang: manifest.info.lang,
+      languages: manifest.info.languages,
       hasHome,
       hasListings,
       listingCount: listings.length,
       filterCount: filters.length,
+      handlesBasicLogin,
+      handlesWebLogin,
       isOnlySearch,
       // Manifest-defined listings vs dynamic
       manifestListings: manifest.listings?.length ?? 0,
@@ -438,14 +451,17 @@ export const capabilities = buildCommand({
 
     printHeader(`Source Capabilities: ${manifest.info.name}`);
     console.log(`  ID: ${manifest.info.id}`);
-    console.log(`  Lang: ${manifest.info.lang}`);
+    console.log(`  Languages: ${manifest.info.languages.join(", ") || "(none)"}`);
     console.log("");
-    console.log(`  ${hasHome ? pc.green("✓") : pc.red("✗")} Home Provider`);
-    console.log(`  ${hasListings ? pc.green("✓") : pc.red("✗")} Listing Provider (${listings.length} listings)`);
+    console.log(`  ${hasHome ? pc.green("✓") : pc.dim("-")} Home Provider (get_home)`);
+    console.log(`  ${hasListingProvider ? pc.green("✓") : pc.dim("-")} Listing Provider (get_manga_list)`);
+    console.log(`  ${hasListings ? pc.green("✓") : pc.dim("-")} Has Listings (${listings.length} total)`);
     console.log(`  ${filters.length > 0 ? pc.green("✓") : pc.dim("-")} Filters (${filters.length})`);
+    console.log(`  ${handlesBasicLogin ? pc.green("✓") : pc.dim("-")} Basic Login Handler`);
+    console.log(`  ${handlesWebLogin ? pc.green("✓") : pc.dim("-")} Web Login Handler`);
     console.log("");
     if (isOnlySearch) {
-      console.log(pc.yellow("  ⚠ OnlySearch mode - no home or listings"));
+      console.log(pc.yellow("  ⚠ OnlySearch mode - no home AND no listings"));
     }
 
     source.dispose();
@@ -507,12 +523,14 @@ export const all = buildCommand({
     const results: TestResult[] = [];
     const log = flags.json ? () => {} : console.log;
 
-    log(pc.cyan(`\n🧪 Testing: ${manifest.info.name} (${manifest.info.lang})\n`));
+    log(pc.cyan(`\n🧪 Testing: ${manifest.info.name} (${getLang(manifest)})\n`));
 
-    // Check capabilities first
+    // Check capabilities using official Aidoku logic
     const hasHome = await source.hasHomeProvider();
-    const hasListings = await source.hasListingProvider();
-    log(pc.dim(`Capabilities: home=${hasHome}, listings=${hasListings}\n`));
+    const hasListingProvider = await source.hasListingProvider();
+    const hasListings = await source.hasListings();
+    const isOnlySearch = await source.isOnlySearch();
+    log(pc.dim(`Capabilities: home=${hasHome}, listingProvider=${hasListingProvider}, hasListings=${hasListings}, onlySearch=${isOnlySearch}\n`));
 
     // Collect manga samples from any available source
     const mangaSamples: Manga[] = [];
@@ -581,19 +599,36 @@ export const all = buildCommand({
       }
     }
 
-    // Test 1C: Search fallback (if no samples yet, or test anyway)
-    const fallbackQuery = flags.query ?? "manga";
+    // Test 1C: Browse (empty query) - this is how onlySearch sources show their "home"
+    // In Aidoku, calling getSearchMangaList with empty/nil query returns default manga list
     if (mangaSamples.length === 0) {
-      log(pc.yellow(`  ⚠ No samples from home/listings, trying search...`));
+      try {
+        log(pc.dim("Testing browse (empty query)..."));
+        const browseResult = await source.getSearchMangaList("", 1, []);
+        const count = browseResult.entries.length;
+        if (count > 0) {
+          results.push({ test: "browse", passed: true, data: { count } });
+          log(pc.green(`  ✓ browse: ${count} manga`));
+          mangaSamples.push(...browseResult.entries.slice(0, 5));
+        } else {
+          results.push({ test: "browse", passed: true, data: { count: 0 } });
+          log(pc.yellow(`  ⚠ browse: empty results`));
+        }
+      } catch (e) {
+        results.push({ test: "browse", passed: false, error: String(e) });
+        log(pc.red(`  ✗ browse: ${e}`));
+      }
     }
+
+    // Test 1D: Search with query
+    const searchQuery = flags.query 
+      ?? (mangaSamples.length > 0 ? (mangaSamples[0].title ?? "").slice(0, 20) : null)
+      ?? "manga";
     try {
-      const query = mangaSamples.length > 0 
-        ? (mangaSamples[0].title ?? "").slice(0, 20) || fallbackQuery
-        : fallbackQuery;
-      log(pc.dim(`Testing search ("${query}")...`));
-      const searchResult = await source.getSearchMangaList(query, 1, []);
+      log(pc.dim(`Testing search ("${searchQuery}")...`));
+      const searchResult = await source.getSearchMangaList(searchQuery, 1, []);
       const count = searchResult.entries.length;
-      results.push({ test: "search", passed: true, data: { query, count } });
+      results.push({ test: "search", passed: true, data: { query: searchQuery, count } });
       log(pc.green(`  ✓ search: ${count} results`));
       
       // Add search results to samples if needed
@@ -603,6 +638,17 @@ export const all = buildCommand({
     } catch (e) {
       results.push({ test: "search", passed: false, error: String(e) });
       log(pc.red(`  ✗ search: ${e}`));
+    }
+
+    // Test 2: Filters
+    try {
+      log(pc.dim("Testing filters..."));
+      const filtersResult = await source.getFilters();
+      results.push({ test: "filters", passed: true, data: { count: filtersResult.length } });
+      log(pc.green(`  ✓ filters: ${filtersResult.length} filters`));
+    } catch (e) {
+      results.push({ test: "filters", passed: false, error: String(e) });
+      log(pc.red(`  ✗ filters: ${e}`));
     }
 
     // Test 3: Manga Details
@@ -709,7 +755,7 @@ export const all = buildCommand({
     if (flags.json) {
       printJson({
         source: sourceId,
-        manifest: { id: manifest.info.id, name: manifest.info.name, lang: manifest.info.lang },
+        manifest: { id: manifest.info.id, name: manifest.info.name, languages: manifest.info.languages },
         summary: { passed, failed, total: results.length },
         results,
       });
