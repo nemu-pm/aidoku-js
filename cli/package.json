@@ -25,5 +25,16 @@
   "devDependencies": {
     "@types/bun": "latest",
     "typescript": "^5.0.0"
-  }
+  },
+  "keywords": [
+    "aidoku",
+    "manga",
+    "comic",
+    "reader",
+    "wasm",
+    "cli",
+    "bun",
+    "nemu"
+  ],
+  "license": "MIT"
 }

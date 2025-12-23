@@ -68,8 +68,12 @@
   "keywords": [
     "aidoku",
     "manga",
+    "comic",
+    "reader",
     "wasm",
-    "runtime"
+    "webassembly",
+    "runtime",
+    "nemu"
   ],
   "license": "MIT",
   "dependencies": {
