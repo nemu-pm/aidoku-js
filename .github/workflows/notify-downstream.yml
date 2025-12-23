@@ -13,6 +13,6 @@ jobs:
           curl -X POST \
             -H "Accept: application/vnd.github.v3+json" \
             -H "Authorization: token ${{ secrets.DOWNSTREAM_PAT }}" \
-            https://api.github.com/repos/nemu-pm/aidoku-community-js/dispatches \
+            https://api.github.com/repos/tigerhix/aidoku-community-js/dispatches \
             -d '{"event_type":"aidoku-js-update"}'
 
