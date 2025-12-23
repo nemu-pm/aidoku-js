@@ -1,0 +1,98 @@
+{
+  "name": "@nemu.pm/aidoku-runtime",
+  "version": "0.0.0-dev",
+  "description": "Runtime for loading and executing Aidoku WASM sources in JavaScript environments",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nemu-pm/aidoku-js.git",
+    "directory": "runtime"
+  },
+  "homepage": "https://github.com/nemu-pm/aidoku-js#readme",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "browser": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "bun": {
+        "types": "./dist/index.node.d.ts",
+        "default": "./dist/index.node.js"
+      },
+      "node": {
+        "types": "./dist/index.node.d.ts",
+        "default": "./dist/index.node.js"
+      },
+      "default": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    },
+    "./async": {
+      "browser": {
+        "types": "./dist/async/index.d.ts",
+        "default": "./dist/async/index.js"
+      },
+      "bun": {
+        "types": "./dist/async/index.node.d.ts",
+        "default": "./dist/async/index.node.js"
+      },
+      "node": {
+        "types": "./dist/async/index.node.d.ts",
+        "default": "./dist/async/index.node.js"
+      },
+      "default": {
+        "types": "./dist/async/index.d.ts",
+        "default": "./dist/async/index.js"
+      }
+    },
+    "./worker": {
+      "types": "./dist/async/worker.d.ts",
+      "default": "./dist/async/worker.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "aidoku",
+    "manga",
+    "wasm",
+    "runtime"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@variegated-coffee/serde-postcard-ts": "^0.1.4",
+    "cheerio": "^1.0.0",
+    "comlink": "^4.4.2",
+    "fflate": "^0.8.2"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^20.0.0",
+    "canvas": "^3.0.0-rc3",
+    "typescript": "^5.0.0"
+  },
+  "optionalDependencies": {
+    "canvas": "^3.0.0-rc3"
+  },
+  "peerDependencies": {
+    "canvas": "^3.0.0-rc3"
+  },
+  "peerDependenciesMeta": {
+    "canvas": {
+      "optional": true
+    }
+  }
+}

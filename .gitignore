@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# CLI config (user-specific)
+aidoku.config.json
+.aidokurc.json
+
+# Cache
+.cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets / env
+.env
+.env.*
+*.key
+*.pem
+
+# Lock files (use bun.lock)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
