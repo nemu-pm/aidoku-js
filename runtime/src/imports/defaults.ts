@@ -151,7 +151,6 @@ export function createDefaultsImports(
 
       // Decode value from WASM memory based on kind
       const value = decodeValueFromWasm(kind, valuePtr);
-      console.debug(`[defaults.set] ${key} = ${JSON.stringify(value)} (kind=${kind})`);
 
       // Call setter if provided
       if (settingsSetter) {

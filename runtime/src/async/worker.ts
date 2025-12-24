@@ -39,11 +39,67 @@ const browserCanvasModule: CanvasModule = {
 const loadSource = createLoadSource(browserCanvasModule);
 
 /**
+ * Extract default values from settings.json structure
+ * Matches iOS Aidoku behavior from Source.swift
+ */
+function extractSettingsDefaults(settingsJson: unknown[] | undefined): Record<string, unknown> {
+  const defaults: Record<string, unknown> = {};
+  if (!settingsJson) return defaults;
+
+  for (const item of settingsJson) {
+    if (typeof item !== "object" || item === null) continue;
+    const settingItem = item as Record<string, unknown>;
+    
+    // Handle group items (nested settings)
+    if (settingItem.type === "group" && Array.isArray(settingItem.items)) {
+      for (const subItem of settingItem.items) {
+        if (typeof subItem !== "object" || subItem === null) continue;
+        const setting = subItem as Record<string, unknown>;
+        if (setting.key && setting.default !== undefined) {
+          defaults[setting.key as string] = setting.default;
+        }
+      }
+    }
+    // Handle top-level items with key and default
+    else if (settingItem.key && settingItem.default !== undefined) {
+      defaults[settingItem.key as string] = settingItem.default;
+    }
+  }
+
+  return defaults;
+}
+
+/**
+ * Apply manifest-based defaults (url, languages)
+ */
+function applyManifestDefaults(
+  settings: Record<string, unknown>,
+  manifest: SourceManifest
+): void {
+  // URL default from allowsBaseUrlSelect
+  if (manifest.config?.allowsBaseUrlSelect && manifest.info.urls?.length) {
+    if (settings.url === undefined) {
+      settings.url = manifest.info.urls[0];
+    }
+  }
+  // Languages default
+  if (manifest.info.languages?.length) {
+    if (settings.languages === undefined) {
+      const selectType = manifest.config?.languageSelectType ?? "single";
+      settings.languages = selectType === "multi"
+        ? manifest.info.languages
+        : [manifest.info.languages[0]];
+    }
+  }
+}
+
+/**
  * Worker-side source wrapper exposed via Comlink
  */
 class WorkerSource {
   private source: (AidokuSource & { settingsJson?: unknown[] }) | null = null;
   private settings: Record<string, unknown> = {};
+  private settingsDefaults: Record<string, unknown> = {};
 
   /**
    * Load an Aidoku source from AIX bytes
@@ -55,8 +111,6 @@ class WorkerSource {
     initialSettings: Record<string, unknown>
   ): Promise<{ success: boolean; settingsJson?: unknown[]; manifest?: SourceManifest }> {
     try {
-      this.settings = initialSettings;
-
       // Create sync XHR bridge with optional proxy
       const httpBridge = createSyncXhrBridge({
         proxyUrl: proxyUrl 
@@ -67,28 +121,21 @@ class WorkerSource {
       // Settings getter reads from local store (updated via updateSettings)
       const settingsGetter = (key: string) => this.settings[key];
 
-      // Load the source
+      // Load the source (but don't initialize yet - we need defaults first)
       this.source = await loadSource(new Uint8Array(aixBytes), sourceKey, {
         httpBridge,
         settingsGetter,
       });
 
-      // Auto-default settings based on manifest config
-      const manifest = this.source.manifest;
-      if (manifest.config?.allowsBaseUrlSelect && manifest.info.urls?.length) {
-        if (!this.settings.url) {
-          this.settings.url = manifest.info.urls[0];
-        }
-      }
-      if (manifest.info.languages?.length) {
-        if (!this.settings.languages) {
-          const selectType = manifest.config?.languageSelectType ?? "single";
-          this.settings.languages = selectType === "multi"
-            ? manifest.info.languages
-            : [manifest.info.languages[0]];
-        }
-      }
+      // Extract defaults from settings.json (like iOS Aidoku does)
+      this.settingsDefaults = extractSettingsDefaults(this.source.settingsJson);
+      
+      // Merge: settingsJson defaults < manifest defaults < user settings
+      this.settings = { ...this.settingsDefaults };
+      applyManifestDefaults(this.settings, this.source.manifest);
+      this.settings = { ...this.settings, ...initialSettings };
 
+      // Now initialize with defaults populated
       this.source.initialize();
 
       return {
@@ -104,9 +151,13 @@ class WorkerSource {
 
   /**
    * Update settings from main thread
+   * Merges with defaults so user settings take precedence
    */
-  updateSettings(settings: Record<string, unknown>): void {
-    this.settings = settings;
+  updateSettings(newUserSettings: Record<string, unknown>): void {
+    if (!this.source) return;
+    this.settings = { ...this.settingsDefaults };
+    applyManifestDefaults(this.settings, this.source.manifest);
+    this.settings = { ...this.settings, ...newUserSettings };
   }
 
   // Source methods - delegate to loaded source

@@ -12,7 +12,7 @@ import {
   getHostImageData,
 } from "../imports/canvas.node";
 import type { AsyncAidokuSource, AsyncLoadOptions } from "./types";
-import type { HomeLayout } from "../types";
+import type { HomeLayout, SourceManifest } from "../types";
 
 // Re-export types
 export type { AsyncAidokuSource, AsyncLoadOptions } from "./types";
@@ -26,6 +26,61 @@ const nodeCanvasModule: CanvasModule = {
 
 // Create sync loadSource
 const loadSourceSync = createLoadSource(nodeCanvasModule);
+
+/**
+ * Extract default values from settings.json structure
+ * Matches iOS Aidoku behavior from Source.swift
+ */
+function extractSettingsDefaults(settingsJson: unknown[] | undefined): Record<string, unknown> {
+  const defaults: Record<string, unknown> = {};
+  if (!settingsJson) return defaults;
+
+  for (const item of settingsJson) {
+    if (typeof item !== "object" || item === null) continue;
+    const settingItem = item as Record<string, unknown>;
+    
+    // Handle group items (nested settings)
+    if (settingItem.type === "group" && Array.isArray(settingItem.items)) {
+      for (const subItem of settingItem.items) {
+        if (typeof subItem !== "object" || subItem === null) continue;
+        const setting = subItem as Record<string, unknown>;
+        if (setting.key && setting.default !== undefined) {
+          defaults[setting.key as string] = setting.default;
+        }
+      }
+    }
+    // Handle top-level items with key and default
+    else if (settingItem.key && settingItem.default !== undefined) {
+      defaults[settingItem.key as string] = settingItem.default;
+    }
+  }
+
+  return defaults;
+}
+
+/**
+ * Apply manifest-based defaults (url, languages)
+ */
+function applyManifestDefaults(
+  settings: Record<string, unknown>,
+  manifest: SourceManifest
+): void {
+  // URL default from allowsBaseUrlSelect
+  if (manifest.config?.allowsBaseUrlSelect && manifest.info.urls?.length) {
+    if (settings.url === undefined) {
+      settings.url = manifest.info.urls[0];
+    }
+  }
+  // Languages default
+  if (manifest.info.languages?.length) {
+    if (settings.languages === undefined) {
+      const selectType = manifest.config?.languageSelectType ?? "single";
+      settings.languages = selectType === "multi"
+        ? manifest.info.languages
+        : [manifest.info.languages[0]];
+    }
+  }
+}
 
 /**
  * Load an Aidoku source asynchronously (Node.js version)
@@ -44,47 +99,43 @@ export async function loadSource(
 ): Promise<AsyncAidokuSource> {
   const { proxyUrl, settings } = options;
 
-  // Get current settings
-  let currentSettings = settings?.get() ?? {};
+  // Get user settings (will be merged with defaults)
+  const userSettings = settings?.get() ?? {};
 
   // Create sync HTTP bridge
   const httpBridge = createSyncNodeBridge({
     proxyUrl: proxyUrl ? (url) => `${proxyUrl}${encodeURIComponent(url)}` : undefined,
   });
 
-  // Settings getter
-  const settingsGetter = (key: string) => currentSettings[key];
-
-  // Load source synchronously (but wrapped in async for API)
+  // Load source (but don't initialize yet - we need to extract defaults first)
   const source = await loadSourceSync(input, sourceKey, {
     httpBridge,
-    settingsGetter,
+    // Provide a getter that will be populated with defaults before initialize()
+    settingsGetter: (key: string) => currentSettings[key],
   });
 
-  // Auto-default settings based on manifest config
-  const manifest = source.manifest;
-  if (manifest.config?.allowsBaseUrlSelect && manifest.info.urls?.length) {
-    if (!currentSettings.url) {
-      currentSettings.url = manifest.info.urls[0];
-    }
-  }
-  if (manifest.info.languages?.length) {
-    if (!currentSettings.languages) {
-      // Default to first language (single select) or all (multi select)
-      const selectType = manifest.config?.languageSelectType ?? "single";
-      currentSettings.languages = selectType === "multi" 
-        ? manifest.info.languages 
-        : [manifest.info.languages[0]];
-    }
-  }
+  // Extract defaults from settings.json (like iOS Aidoku does)
+  const settingsDefaults = extractSettingsDefaults(source.settingsJson);
+  
+  // Merge: settingsJson defaults < manifest defaults < user settings
+  // (user settings take precedence over defaults)
+  let currentSettings: Record<string, unknown> = { ...settingsDefaults };
+  applyManifestDefaults(currentSettings, source.manifest);
+  currentSettings = { ...currentSettings, ...userSettings };
 
+  // Now initialize with defaults populated
   source.initialize();
 
   // Subscribe to settings changes if available
+  // Always merge with defaults so user settings take precedence
   let unsubscribe: (() => void) | undefined;
   if (settings?.subscribe) {
     unsubscribe = settings.subscribe(() => {
-      currentSettings = settings.get();
+      const newUserSettings = settings.get();
+      // Re-apply defaults, then overlay new user settings
+      currentSettings = { ...settingsDefaults };
+      applyManifestDefaults(currentSettings, source.manifest);
+      currentSettings = { ...currentSettings, ...newUserSettings };
     });
   }
 
