@@ -1,0 +1,201 @@
+name: Release & Publish
+
+on:
+  # Auto-release on push to main
+  push:
+    branches: [main]
+    paths:
+      - 'runtime/**'
+      - 'cli/**'
+  # Manual release via GitHub UI
+  release:
+    types: [published]
+  # Manual trigger via Actions UI
+  workflow_dispatch:
+    inputs:
+      package:
+        description: 'Package to release'
+        required: true
+        type: choice
+        options:
+          - runtime
+          - cli
+          - both
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  # Determine what to release
+  determine-release:
+    runs-on: ubuntu-latest
+    outputs:
+      runtime: ${{ steps.check.outputs.runtime }}
+      cli: ${{ steps.check.outputs.cli }}
+      runtime_version: ${{ steps.check.outputs.runtime_version }}
+      cli_version: ${{ steps.check.outputs.cli_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # For push events, check what files changed
+      - uses: dorny/paths-filter@v3
+        id: filter
+        if: github.event_name == 'push'
+        with:
+          filters: |
+            runtime:
+              - 'runtime/**'
+            cli:
+              - 'cli/**'
+
+      - name: Determine packages and versions
+        id: check
+        run: |
+          # Get current npm versions
+          RUNTIME_CURRENT=$(npm view @nemu.pm/aidoku-runtime version 2>/dev/null || echo "0.0.0")
+          CLI_CURRENT=$(npm view @nemu.pm/aidoku-cli version 2>/dev/null || echo "0.0.0")
+          
+          # Helper to bump minor
+          bump_minor() {
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$1"
+            echo "${MAJOR}.$((MINOR + 1)).0"
+          }
+          
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            # Auto-release: bump minor for changed packages
+            echo "runtime=${{ steps.filter.outputs.runtime }}" >> $GITHUB_OUTPUT
+            echo "cli=${{ steps.filter.outputs.cli }}" >> $GITHUB_OUTPUT
+            echo "runtime_version=$(bump_minor $RUNTIME_CURRENT)" >> $GITHUB_OUTPUT
+            echo "cli_version=$(bump_minor $CLI_CURRENT)" >> $GITHUB_OUTPUT
+            
+          elif [[ "${{ github.event_name }}" == "release" ]]; then
+            # Manual release via GitHub release
+            TAG="${{ github.event.release.tag_name }}"
+            if [[ "$TAG" == runtime-v* ]]; then
+              echo "runtime=true" >> $GITHUB_OUTPUT
+              echo "cli=false" >> $GITHUB_OUTPUT
+              echo "runtime_version=${TAG#runtime-v}" >> $GITHUB_OUTPUT
+            elif [[ "$TAG" == cli-v* ]]; then
+              echo "runtime=false" >> $GITHUB_OUTPUT
+              echo "cli=true" >> $GITHUB_OUTPUT
+              echo "cli_version=${TAG#cli-v}" >> $GITHUB_OUTPUT
+            fi
+            
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # Manual trigger via Actions UI
+            PACKAGE="${{ inputs.package }}"
+            if [[ "$PACKAGE" == "runtime" || "$PACKAGE" == "both" ]]; then
+              echo "runtime=true" >> $GITHUB_OUTPUT
+              echo "runtime_version=$(bump_minor $RUNTIME_CURRENT)" >> $GITHUB_OUTPUT
+            else
+              echo "runtime=false" >> $GITHUB_OUTPUT
+            fi
+            if [[ "$PACKAGE" == "cli" || "$PACKAGE" == "both" ]]; then
+              echo "cli=true" >> $GITHUB_OUTPUT
+              echo "cli_version=$(bump_minor $CLI_CURRENT)" >> $GITHUB_OUTPUT
+            else
+              echo "cli=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+  publish-runtime:
+    needs: determine-release
+    if: needs.determine-release.outputs.runtime == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: bun install
+        working-directory: runtime
+
+      - name: Build
+        run: bun run build
+        working-directory: runtime
+
+      - name: Set version
+        working-directory: runtime
+        run: |
+          VERSION="${{ needs.determine-release.outputs.runtime_version }}"
+          echo "Publishing runtime v$VERSION"
+          npm pkg set version="$VERSION"
+
+      - name: Publish to npm
+        run: npm publish --access public --provenance
+        working-directory: runtime
+
+      - name: Create GitHub Release
+        if: github.event_name != 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: runtime-v${{ needs.determine-release.outputs.runtime_version }}
+          name: Runtime v${{ needs.determine-release.outputs.runtime_version }}
+          body: |
+            Published to npm as `@nemu.pm/aidoku-runtime@${{ needs.determine-release.outputs.runtime_version }}`
+          generate_release_notes: true
+
+  publish-cli:
+    needs: determine-release
+    if: needs.determine-release.outputs.cli == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install runtime dependencies
+        run: bun install
+        working-directory: runtime
+
+      - name: Build runtime
+        run: bun run build
+        working-directory: runtime
+
+      - name: Install CLI dependencies
+        run: bun install
+        working-directory: cli
+
+      - name: Link local runtime to CLI
+        run: |
+          rm -rf node_modules/@nemu.pm/aidoku-runtime
+          ln -s ../../../runtime node_modules/@nemu.pm/aidoku-runtime
+        working-directory: cli
+
+      - name: Typecheck CLI
+        run: bun run typecheck
+        working-directory: cli
+
+      - name: Set version
+        working-directory: cli
+        run: |
+          VERSION="${{ needs.determine-release.outputs.cli_version }}"
+          echo "Publishing CLI v$VERSION"
+          npm pkg set version="$VERSION"
+
+      - name: Publish to npm
+        run: npm publish --access public --provenance
+        working-directory: cli
+
+      - name: Create GitHub Release
+        if: github.event_name != 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: cli-v${{ needs.determine-release.outputs.cli_version }}
+          name: CLI v${{ needs.determine-release.outputs.cli_version }}
+          body: |
+            Published to npm as `@nemu.pm/aidoku-cli@${{ needs.determine-release.outputs.cli_version }}`
+          generate_release_notes: true
+

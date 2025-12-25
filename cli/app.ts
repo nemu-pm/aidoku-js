@@ -1,3 +1,4 @@
+/** CLI application - test and explore Aidoku sources */
 import { buildApplication, buildRouteMap } from "@stricli/core";
 import { list } from "./commands/list";
 import { info } from "./commands/info";

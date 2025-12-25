@@ -1,5 +1,6 @@
 /**
- * Aidoku WASM Runtime - loads and executes Aidoku source modules
+ * Aidoku WASM Runtime
+ * Loads and executes Aidoku source modules in JavaScript environments.
  */
 import { GlobalStore } from "./global-store";
 import type {
