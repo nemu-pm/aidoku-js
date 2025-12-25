@@ -9,9 +9,9 @@ import {
 } from "../lib/source-loader";
 import { printHeader, printJson, printListItem } from "../lib/output";
 
-function getLang(manifest: { info: { id: string; lang?: string; languages: string[] } }): string {
+function getLang(manifest: { info: { id: string; lang?: string; languages?: string[] } }): string {
   // Official Aidoku: use languages array, fall back to deprecated lang or id prefix
-  return manifest.info.languages[0] 
+  return manifest.info.languages?.[0] 
     ?? manifest.info.lang 
     ?? manifest.info.id.split(".")[0];
 }
@@ -430,7 +430,7 @@ export const capabilities = buildCommand({
     const caps = {
       id: manifest.info.id,
       name: manifest.info.name,
-      languages: manifest.info.languages,
+      languages: manifest.info.languages ?? [],
       hasHome,
       hasListings,
       listingCount: listings.length,
@@ -451,7 +451,7 @@ export const capabilities = buildCommand({
 
     printHeader(`Source Capabilities: ${manifest.info.name}`);
     console.log(`  ID: ${manifest.info.id}`);
-    console.log(`  Languages: ${manifest.info.languages.join(", ") || "(none)"}`);
+    console.log(`  Languages: ${manifest.info.languages?.join(", ") || "(none)"}`);
     console.log("");
     console.log(`  ${hasHome ? pc.green("✓") : pc.dim("-")} Home Provider (get_home)`);
     console.log(`  ${hasListingProvider ? pc.green("✓") : pc.dim("-")} Listing Provider (get_manga_list)`);

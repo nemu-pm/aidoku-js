@@ -352,7 +352,7 @@ export interface SourceInfo {
   urls?: string[];
   contentRating?: number;
   /** Languages supported by this source (ISO 639-1 codes) */
-  languages: string[];
+  languages?: string[];
 }
 
 /** Settings definition for user-configurable source options */

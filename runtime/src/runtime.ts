@@ -461,7 +461,6 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
       if (!isNewAbi && oldGetMangaList) {
         const scope = store.createScope();
         try {
-          console.log(`[Aidoku DEBUG] OLD ABI getSearchMangaList: query=${JSON.stringify(query)}, page=${page}, filters=${JSON.stringify(filters)}`);
           const SwiftFilterType = {
             base: 0,
             group: 1,
@@ -550,8 +549,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
           return { entries, hasNextPage: result.hasNextPage ?? false };
         } catch (e) {
           console.error("[Aidoku] OLD ABI getSearchMangaList error:", e);
-          console.error("[Aidoku DEBUG] Failed with query:", JSON.stringify(query), "page:", page, "filters:", JSON.stringify(filters));
-          throw e; // Re-throw so caller knows about the error
+          throw e;
         } finally {
           scope.cleanup();
         }

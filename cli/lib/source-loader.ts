@@ -61,8 +61,8 @@ export function listSources(sourcesDir: string): SourceListItem[] {
       sources.push({
         id: manifest.info.id,
         name: manifest.info.name,
-        lang: manifest.info.languages[0] ?? manifest.info.id.split(".")[0],
-        languages: manifest.info.languages,
+        lang: manifest.info.languages?.[0] ?? manifest.info.id.split(".")[0],
+        languages: manifest.info.languages ?? [],
         version: manifest.info.version,
         contentRating: manifest.info.contentRating ?? ContentRating.Safe,
         path: filePath,
