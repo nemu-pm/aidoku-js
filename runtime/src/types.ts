@@ -1,5 +1,5 @@
 /**
- * @aidoku-js/runtime types
+ * @nemu.pm/aidoku-runtime types
  *
  * Types matching Aidoku's Swift/Rust structures for WASM source interop.
  */

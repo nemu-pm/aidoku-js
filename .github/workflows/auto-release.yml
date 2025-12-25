@@ -1,4 +1,4 @@
-name: Auto Release on Push
+name: Auto Release & Publish on Push
 
 on:
   push:
@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   check-changes:
@@ -34,6 +35,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
       - name: Get current npm version
         id: npm-version
         run: |
@@ -50,15 +58,29 @@ jobs:
           echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "Bumping from $CURRENT to $NEW_VERSION"
 
-      - name: Create Runtime Release
+      - name: Install dependencies
+        run: bun install
+        working-directory: runtime
+
+      - name: Build
+        run: bun run build
+        working-directory: runtime
+
+      - name: Set version
+        working-directory: runtime
+        run: npm pkg set version="${{ steps.bump.outputs.version }}"
+
+      - name: Publish to npm
+        run: npm publish --access public --provenance
+        working-directory: runtime
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: runtime-v${{ steps.bump.outputs.version }}
           name: Runtime v${{ steps.bump.outputs.version }}
           body: |
-            Auto-release triggered by push to main.
-            
-            Changes in this release affect the `@nemu.pm/aidoku-runtime` package.
+            Published to npm as `@nemu.pm/aidoku-runtime@${{ steps.bump.outputs.version }}`
           generate_release_notes: true
 
   release-cli:
@@ -67,6 +89,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
 
       - name: Get current npm version
         id: npm-version
@@ -84,14 +113,35 @@ jobs:
           echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "Bumping from $CURRENT to $NEW_VERSION"
 
-      - name: Create CLI Release
+      - name: Install runtime dependencies
+        run: bun install
+        working-directory: runtime
+
+      - name: Build runtime
+        run: bun run build
+        working-directory: runtime
+
+      - name: Install CLI dependencies
+        run: bun install
+        working-directory: cli
+
+      - name: Typecheck CLI
+        run: bun run typecheck
+        working-directory: cli
+
+      - name: Set version
+        working-directory: cli
+        run: npm pkg set version="${{ steps.bump.outputs.version }}"
+
+      - name: Publish to npm
+        run: npm publish --access public --provenance
+        working-directory: cli
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: cli-v${{ steps.bump.outputs.version }}
           name: CLI v${{ steps.bump.outputs.version }}
           body: |
-            Auto-release triggered by push to main.
-            
-            Changes in this release affect the `@nemu.pm/aidoku-cli` package.
+            Published to npm as `@nemu.pm/aidoku-cli@${{ steps.bump.outputs.version }}`
           generate_release_notes: true
-

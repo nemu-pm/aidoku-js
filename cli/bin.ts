@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+// @nemu.pm/aidoku-cli - CLI for testing Aidoku sources
 import { run } from "@stricli/core";
 import { app } from "./app";
 
