@@ -1,4 +1,4 @@
-# @aidoku-js/runtime
+# aidoku-js
 
 Runtime for loading and executing [Aidoku](https://github.com/Aidoku/Aidoku) WASM sources in JavaScript environments.
 
