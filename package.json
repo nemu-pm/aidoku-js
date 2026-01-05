@@ -11,7 +11,8 @@
   "scripts": {
     "typecheck": "bun run typecheck:runtime && bun run typecheck:cli",
     "typecheck:runtime": "bunx tsc --noEmit -p runtime",
-    "typecheck:cli": "bunx tsc --noEmit -p cli"
+    "typecheck:cli": "bunx tsc --noEmit -p cli",
+    "test:e2e:agent": "bun tests/e2e-agent-source.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

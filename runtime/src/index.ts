@@ -103,3 +103,6 @@ export { RuntimeMode, detectRuntimeMode } from "./result-decoder";
 
 // GlobalStore (for advanced usage)
 export { GlobalStore } from "./global-store";
+
+// Errors
+export { CloudflareBlockedError } from "./imports/net";

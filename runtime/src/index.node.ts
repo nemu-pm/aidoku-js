@@ -103,3 +103,10 @@ export { RuntimeMode, detectRuntimeMode } from "./result-decoder";
 
 // GlobalStore (for advanced usage)
 export { GlobalStore } from "./global-store";
+
+// Errors
+export { CloudflareBlockedError } from "./imports/net";
+
+// Cloudflare bypass via agent
+export { solveViaAgent } from "./cloudflare/agent";
+export type { CfCookie, CloudflareBypass } from "./cloudflare/types";

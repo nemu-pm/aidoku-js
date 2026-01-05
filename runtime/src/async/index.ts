@@ -2,17 +2,27 @@
  * Browser async runtime
  * 
  * Creates a Web Worker internally, exposes clean async API.
- * Consumer doesn't need to manage workers.
+ * Supports two HTTP modes:
+ * - XHR mode: Worker uses sync XHR to proxy URL (default)
+ * - SAB mode: Worker uses SharedArrayBuffer, main thread routes HTTP through custom fetch
  */
 import * as Comlink from "comlink";
 import type { WorkerSourceApi } from "./worker";
-import type { AsyncAidokuSource, AsyncLoadOptions } from "./types";
+import type { AsyncAidokuSource, AsyncLoadOptions, CustomFetchFn } from "./types";
 import type { SourceManifest, HomeLayout } from "../types";
 import type { SourceInput } from "../runtime";
 import { isAixPackage } from "../aix";
+import { 
+  createSabMainThreadHandler, 
+  createSabBuffer,
+  isSharedArrayBufferAvailable,
+  type SabHttpRequest,
+} from "../http/sync-sab";
+import { createAgentFetch } from "./common";
 
 // Re-export types
-export type { AsyncAidokuSource, AsyncLoadOptions } from "./types";
+export type { AsyncAidokuSource, AsyncLoadOptions, CustomFetchFn } from "./types";
+export { isSharedArrayBufferAvailable } from "../http/sync-sab";
 
 /**
  * Load an Aidoku source asynchronously (browser version)
@@ -22,14 +32,21 @@ export type { AsyncAidokuSource, AsyncLoadOptions } from "./types";
  * 
  * @param input - AIX bytes or SourceComponents
  * @param sourceKey - Unique identifier for settings/storage
- * @param options - Proxy URL and settings configuration
+ * @param options - Proxy URL, agent URL, settings, and optional custom fetch for SAB mode
  */
 export async function loadSource(
   input: SourceInput,
   sourceKey: string,
   options: AsyncLoadOptions = {}
 ): Promise<AsyncAidokuSource> {
-  const { proxyUrl, settings } = options;
+  const { proxyUrl, agentUrl, settings } = options;
+  
+  // Resolve customFetch: explicit > agentUrl > undefined
+  let customFetch: CustomFetchFn | undefined = options.customFetch;
+  if (!customFetch && agentUrl) {
+    customFetch = createAgentFetch(agentUrl);
+    console.log(`[Aidoku] 🚀 Agent detected - using native TLS`);
+  }
 
   // Convert input to AIX bytes if needed
   let aixBytes: ArrayBuffer;
@@ -49,12 +66,41 @@ export async function loadSource(
     throw new Error("Invalid input: expected AIX package bytes");
   }
 
+  // Decide whether to use SAB mode
+  const useSabMode = customFetch && isSharedArrayBufferAvailable();
+  
+  // Create SharedArrayBuffer for data exchange if using SAB mode
+  let sharedBuffer: SharedArrayBuffer | null = null;
+  if (useSabMode) {
+    sharedBuffer = createSabBuffer(); // 10MB buffer for response data
+    console.log("[Aidoku] ✅ SharedArrayBuffer mode active - HTTP routed through extension");
+  } else if (customFetch && !isSharedArrayBufferAvailable()) {
+    console.warn("[Aidoku] ⚠️ Extension available but SharedArrayBuffer not supported - falling back to proxy");
+  }
+
   // Create worker using standard URL pattern
   // Bundlers (Vite, webpack, esbuild) handle this automatically
   const worker = new Worker(
     new URL("./worker.js", import.meta.url),
     { type: "module" }
   );
+
+  // Set up SAB mode handler if using custom fetch
+  let sabHandler: ((msg: SabHttpRequest) => Promise<void>) | null = null;
+  
+  if (useSabMode && sharedBuffer && customFetch) {
+    // Create handler that routes HTTP through customFetch
+    // Response data is written directly to SharedArrayBuffer
+    sabHandler = createSabMainThreadHandler(customFetch, sharedBuffer);
+    
+    // Listen for HTTP requests from worker
+    worker.addEventListener("message", (event) => {
+      const msg = event.data;
+      if (msg?.type === "HTTP_REQUEST") {
+        sabHandler!(msg as SabHttpRequest);
+      }
+    });
+  }
 
   // Wrap with Comlink
   const workerSource = Comlink.wrap<WorkerSourceApi>(worker);
@@ -63,11 +109,13 @@ export async function loadSource(
   const initialSettings = settings?.get() ?? {};
 
   // Load source in worker
+  // Pass sharedBuffer if using SAB mode
   const result = await workerSource.load(
     Comlink.transfer(aixBytes, [aixBytes]),
     sourceKey,
-    proxyUrl ?? null,
-    initialSettings
+    useSabMode ? null : (proxyUrl ?? null), // Don't use proxyUrl in SAB mode
+    initialSettings,
+    sharedBuffer // Will be null if not using SAB mode
   );
 
   if (!result.success || !result.manifest) {
@@ -186,4 +234,3 @@ export async function loadSource(
 
   return source;
 }
-

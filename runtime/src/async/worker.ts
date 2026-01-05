@@ -3,12 +3,13 @@
  * 
  * This worker:
  * 1. Receives AIX bytes and config from main thread
- * 2. Uses sync XHR for HTTP (safe in worker)
+ * 2. Uses sync XHR OR SharedArrayBuffer bridge for HTTP
  * 3. Exposes AidokuSource methods via Comlink
  */
 import * as Comlink from "comlink";
 import { createLoadSource } from "../runtime";
 import { createSyncXhrBridge } from "../http/sync-xhr";
+import { createSabWorkerBridge, type SabHttpBridge } from "../http/sync-sab";
 import {
   createCanvasImports,
   createHostImage,
@@ -24,9 +25,11 @@ import type {
   Listing,
   SourceManifest,
   HomeLayout,
+  HttpBridge,
 } from "../types";
 import type { CanvasModule } from "../runtime";
 import type { AidokuSource } from "../runtime";
+import { extractSettingsDefaults, applyManifestDefaults } from "./common";
 
 // Browser canvas module
 const browserCanvasModule: CanvasModule = {
@@ -38,85 +41,50 @@ const browserCanvasModule: CanvasModule = {
 // Create loadSource with browser canvas
 const loadSource = createLoadSource(browserCanvasModule);
 
-/**
- * Extract default values from settings.json structure
- * Matches iOS Aidoku behavior from Source.swift
- */
-function extractSettingsDefaults(settingsJson: unknown[] | undefined): Record<string, unknown> {
-  const defaults: Record<string, unknown> = {};
-  if (!settingsJson) return defaults;
-
-  for (const item of settingsJson) {
-    if (typeof item !== "object" || item === null) continue;
-    const settingItem = item as Record<string, unknown>;
-    
-    // Handle group items (nested settings)
-    if (settingItem.type === "group" && Array.isArray(settingItem.items)) {
-      for (const subItem of settingItem.items) {
-        if (typeof subItem !== "object" || subItem === null) continue;
-        const setting = subItem as Record<string, unknown>;
-        if (setting.key && setting.default !== undefined) {
-          defaults[setting.key as string] = setting.default;
-        }
-      }
-    }
-    // Handle top-level items with key and default
-    else if (settingItem.key && settingItem.default !== undefined) {
-      defaults[settingItem.key as string] = settingItem.default;
-    }
-  }
-
-  return defaults;
-}
-
-/**
- * Apply manifest-based defaults (url, languages)
- */
-function applyManifestDefaults(
-  settings: Record<string, unknown>,
-  manifest: SourceManifest
-): void {
-  // URL default from allowsBaseUrlSelect
-  if (manifest.config?.allowsBaseUrlSelect && manifest.info.urls?.length) {
-    if (settings.url === undefined) {
-      settings.url = manifest.info.urls[0];
-    }
-  }
-  // Languages default
-  if (manifest.info.languages?.length) {
-    if (settings.languages === undefined) {
-      const selectType = manifest.config?.languageSelectType ?? "single";
-      settings.languages = selectType === "multi"
-        ? manifest.info.languages
-        : [manifest.info.languages[0]];
-    }
-  }
-}
+// SAB bridge instance (if using SAB mode)
+let sabBridge: SabHttpBridge | null = null;
 
 /**
  * Worker-side source wrapper exposed via Comlink
  */
 class WorkerSource {
-  private source: (AidokuSource & { settingsJson?: unknown[] }) | null = null;
+  private source: AidokuSource | null = null;
   private settings: Record<string, unknown> = {};
   private settingsDefaults: Record<string, unknown> = {};
 
   /**
    * Load an Aidoku source from AIX bytes
+   * 
+   * @param sharedBuffer - If provided, use SharedArrayBuffer bridge for HTTP (extension mode)
+   *                       If null, use sync XHR with proxyUrl
    */
   async load(
     aixBytes: ArrayBuffer,
     sourceKey: string,
     proxyUrl: string | null,
-    initialSettings: Record<string, unknown>
+    initialSettings: Record<string, unknown>,
+    sharedBuffer: SharedArrayBuffer | null = null
   ): Promise<{ success: boolean; settingsJson?: unknown[]; manifest?: SourceManifest }> {
     try {
-      // Create sync XHR bridge with optional proxy
-      const httpBridge = createSyncXhrBridge({
-        proxyUrl: proxyUrl 
-          ? (url) => `${proxyUrl}${encodeURIComponent(url)}`
-          : undefined,
-      });
+      let httpBridge: HttpBridge;
+      
+      if (sharedBuffer) {
+        // SAB mode - use SharedArrayBuffer bridge for extension proxy
+        console.log("[Worker] Using SharedArrayBuffer HTTP bridge (extension mode)");
+        sabBridge = createSabWorkerBridge(
+          (msg) => self.postMessage(msg),
+          sharedBuffer
+        );
+        httpBridge = sabBridge;
+      } else {
+        // XHR mode - use sync XHR with optional proxy
+        console.log("[Worker] Using sync XHR HTTP bridge");
+        httpBridge = createSyncXhrBridge({
+          proxyUrl: proxyUrl 
+            ? (url) => `${proxyUrl}${encodeURIComponent(url)}`
+            : undefined,
+        });
+      }
 
       // Settings getter reads from local store (updated via updateSettings)
       const settingsGetter = (key: string) => this.settings[key];
@@ -288,4 +256,3 @@ Comlink.expose(workerSource);
 
 // Export type for main thread
 export type WorkerSourceApi = WorkerSource;
-

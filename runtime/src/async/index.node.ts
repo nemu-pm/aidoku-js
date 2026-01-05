@@ -12,10 +12,15 @@ import {
   getHostImageData,
 } from "../imports/canvas.node";
 import type { AsyncAidokuSource, AsyncLoadOptions } from "./types";
-import type { HomeLayout, SourceManifest } from "../types";
+import {
+  extractSettingsDefaults,
+  applyManifestDefaults,
+  createCfRetry,
+  createAsyncWrapper,
+} from "./common";
 
 // Re-export types
-export type { AsyncAidokuSource, AsyncLoadOptions } from "./types";
+export type { AsyncAidokuSource, AsyncLoadOptions, CustomFetchFn } from "./types";
 
 // Node canvas module
 const nodeCanvasModule: CanvasModule = {
@@ -28,61 +33,6 @@ const nodeCanvasModule: CanvasModule = {
 const loadSourceSync = createLoadSource(nodeCanvasModule);
 
 /**
- * Extract default values from settings.json structure
- * Matches iOS Aidoku behavior from Source.swift
- */
-function extractSettingsDefaults(settingsJson: unknown[] | undefined): Record<string, unknown> {
-  const defaults: Record<string, unknown> = {};
-  if (!settingsJson) return defaults;
-
-  for (const item of settingsJson) {
-    if (typeof item !== "object" || item === null) continue;
-    const settingItem = item as Record<string, unknown>;
-    
-    // Handle group items (nested settings)
-    if (settingItem.type === "group" && Array.isArray(settingItem.items)) {
-      for (const subItem of settingItem.items) {
-        if (typeof subItem !== "object" || subItem === null) continue;
-        const setting = subItem as Record<string, unknown>;
-        if (setting.key && setting.default !== undefined) {
-          defaults[setting.key as string] = setting.default;
-        }
-      }
-    }
-    // Handle top-level items with key and default
-    else if (settingItem.key && settingItem.default !== undefined) {
-      defaults[settingItem.key as string] = settingItem.default;
-    }
-  }
-
-  return defaults;
-}
-
-/**
- * Apply manifest-based defaults (url, languages)
- */
-function applyManifestDefaults(
-  settings: Record<string, unknown>,
-  manifest: SourceManifest
-): void {
-  // URL default from allowsBaseUrlSelect
-  if (manifest.config?.allowsBaseUrlSelect && manifest.info.urls?.length) {
-    if (settings.url === undefined) {
-      settings.url = manifest.info.urls[0];
-    }
-  }
-  // Languages default
-  if (manifest.info.languages?.length) {
-    if (settings.languages === undefined) {
-      const selectType = manifest.config?.languageSelectType ?? "single";
-      settings.languages = selectType === "multi"
-        ? manifest.info.languages
-        : [manifest.info.languages[0]];
-    }
-  }
-}
-
-/**
  * Load an Aidoku source asynchronously (Node.js version)
  * 
  * Runs directly on main thread using sync HTTP.
@@ -90,27 +40,35 @@ function applyManifestDefaults(
  * 
  * @param input - AIX bytes or SourceComponents
  * @param sourceKey - Unique identifier for settings/storage
- * @param options - Proxy URL and settings configuration
+ * @param options - Proxy URL, agent URL, and settings configuration
  */
 export async function loadSource(
   input: SourceInput,
   sourceKey: string,
   options: AsyncLoadOptions = {}
 ): Promise<AsyncAidokuSource> {
-  const { proxyUrl, settings } = options;
+  const { proxyUrl, agentUrl, settings } = options;
 
   // Get user settings (will be merged with defaults)
   const userSettings = settings?.get() ?? {};
 
   // Create sync HTTP bridge
+  // If agentUrl is provided, route all HTTP through the agent
   const httpBridge = createSyncNodeBridge({
     proxyUrl: proxyUrl ? (url) => `${proxyUrl}${encodeURIComponent(url)}` : undefined,
+    agentUrl,
   });
+  
+  if (agentUrl) {
+    console.log(`[Aidoku] Using Nemu Agent at ${agentUrl}`);
+  }
 
-  // Load source (but don't initialize yet - we need to extract defaults first)
+  // Settings state - populated after loading source
+  let currentSettings: Record<string, unknown> = {};
+
+  // Load source with settings getter that uses currentSettings
   const source = await loadSourceSync(input, sourceKey, {
     httpBridge,
-    // Provide a getter that will be populated with defaults before initialize()
     settingsGetter: (key: string) => currentSettings[key],
   });
 
@@ -118,8 +76,7 @@ export async function loadSource(
   const settingsDefaults = extractSettingsDefaults(source.settingsJson);
   
   // Merge: settingsJson defaults < manifest defaults < user settings
-  // (user settings take precedence over defaults)
-  let currentSettings: Record<string, unknown> = { ...settingsDefaults };
+  currentSettings = { ...settingsDefaults };
   applyManifestDefaults(currentSettings, source.manifest);
   currentSettings = { ...currentSettings, ...userSettings };
 
@@ -127,7 +84,6 @@ export async function loadSource(
   source.initialize();
 
   // Subscribe to settings changes if available
-  // Always merge with defaults so user settings take precedence
   let unsubscribe: (() => void) | undefined;
   if (settings?.subscribe) {
     unsubscribe = settings.subscribe(() => {
@@ -139,114 +95,14 @@ export async function loadSource(
     });
   }
 
-  // Return async wrapper (methods are sync but return Promises for consistency)
-  const asyncSource: AsyncAidokuSource = {
-    id: source.id,
-    manifest: source.manifest,
-    settingsJson: source.settingsJson,
+  // Create CF retry wrapper
+  const cfRetry = createCfRetry(agentUrl);
 
-    async getSearchMangaList(query, page, filters) {
-      return source.getSearchMangaList(query, page, filters);
-    },
-
-    async getMangaDetails(manga) {
-      return source.getMangaDetails(manga);
-    },
-
-    async getChapterList(manga) {
-      return source.getChapterList(manga);
-    },
-
-    async getPageList(manga, chapter) {
-      return source.getPageList(manga, chapter);
-    },
-
-    async getFilters() {
-      return source.getFilters();
-    },
-
-    async getListings() {
-      // Official Aidoku: staticListings + dynamicListings (if available)
-      const staticListings = source.manifest.listings ?? [];
-      if (source.hasDynamicListings) {
-        return [...staticListings, ...source.getListings()];
-      }
-      return staticListings;
-    },
-
-    async getMangaListForListing(listing, page) {
-      return source.getMangaListForListing(listing, page);
-    },
-
-    async hasListingProvider() {
-      // WASM provides get_manga_list (ListingProvider trait)
-      return source.hasListingProvider;
-    },
-
-    async hasHomeProvider() {
-      // WASM provides get_home (Home trait)
-      return source.hasHome;
-    },
-
-    async hasListings() {
-      // Official Aidoku: dynamicListings || staticListings.length > 0
-      const staticListings = source.manifest.listings ?? [];
-      return source.hasDynamicListings || staticListings.length > 0;
-    },
-
-    async isOnlySearch() {
-      // Official Aidoku: !providesHome && !hasListings
-      const hasHome = source.hasHome;
-      const staticListings = source.manifest.listings ?? [];
-      const hasListings = source.hasDynamicListings || staticListings.length > 0;
-      return !hasHome && !hasListings;
-    },
-
-    async handlesBasicLogin() {
-      return source.handlesBasicLogin;
-    },
-
-    async handlesWebLogin() {
-      return source.handlesWebLogin;
-    },
-
-    async getHome() {
-      return source.getHome();
-    },
-
-    async getHomeWithPartials(onPartial: (layout: HomeLayout) => void) {
-      return source.getHomeWithPartials(onPartial);
-    },
-
-    async modifyImageRequest(url) {
-      return source.modifyImageRequest(url);
-    },
-
-    async hasImageProcessor() {
-      return source.hasImageProcessor;
-    },
-
-    async processPageImage(imageData, context, requestUrl, requestHeaders, responseCode, responseHeaders) {
-      return source.processPageImage(
-        imageData,
-        context,
-        requestUrl,
-        requestHeaders,
-        responseCode,
-        responseHeaders
-      );
-    },
-
-    updateSettings(newSettings) {
-      currentSettings = newSettings;
-    },
-
-    dispose() {
-      unsubscribe?.();
-      // No worker to terminate in Node
-    },
-  };
-
-  return asyncSource;
+  // Create and return async wrapper
+  return createAsyncWrapper(
+    source,
+    cfRetry,
+    (newSettings) => { currentSettings = newSettings; },
+    () => { unsubscribe?.(); }
+  );
 }
-

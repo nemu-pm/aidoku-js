@@ -30,6 +30,7 @@ import {
   createEnvImports,
   createAidokuImports,
   createJsImports,
+  CloudflareBlockedError,
   type SettingsGetter,
   type SettingsSetter,
 } from "./imports";
@@ -74,6 +75,8 @@ import {
 export interface AidokuSource {
   id: string;
   manifest: SourceManifest;
+  /** Raw settings.json from AIX package */
+  settingsJson?: unknown[];
   /** Runtime mode: legacy (Swift-era) or aidoku-rs (modern) */
   mode: RuntimeMode;
   /** Whether this source has a page image processor (for descrambling) */
@@ -169,7 +172,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
     input: SourceInput,
     sourceKey: string,
     options: AidokuRuntimeOptions
-  ): Promise<AidokuSource & { settingsJson?: unknown[] }> {
+  ): Promise<AidokuSource> {
     const { httpBridge, settingsGetter = () => undefined, settingsSetter, canvasModule = defaultCanvasModule } = options;
     const { createCanvasImports, createHostImage, getHostImageData } = canvasModule;
     const store = new GlobalStore(sourceKey);
@@ -424,6 +427,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
 
       return finalLayout.components.length > 0 ? finalLayout : null;
     } catch (e) {
+      if (e instanceof CloudflareBlockedError) throw e;
       console.error("[Aidoku] getHome error:", e);
       store.onPartialHomeBytes = null;
       return null;
@@ -602,6 +606,8 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
 
         return { entries, hasNextPage: decoded.hasNextPage };
       } catch (e) {
+        // Re-throw CloudflareBlockedError for async layer to handle
+        if (e instanceof CloudflareBlockedError) throw e;
         console.error("[Aidoku] getSearchMangaList error:", e);
         return { entries: [], hasNextPage: false };
       } finally {
@@ -658,6 +664,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
             viewer: (result.viewer as Viewer) ?? manga.viewer,
           };
         } catch (e) {
+          if (e instanceof CloudflareBlockedError) throw e;
           console.error("[Aidoku] OLD ABI getMangaDetails error:", e);
           return manga;
         } finally {
@@ -699,6 +706,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
           viewer: decoded.viewer as Viewer | undefined,
         };
       } catch (e) {
+        if (e instanceof CloudflareBlockedError) throw e;
         console.error("[Aidoku] getMangaDetails error:", e);
         return manga;
       } finally {
@@ -748,6 +756,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
             };
           });
         } catch (e) {
+          if (e instanceof CloudflareBlockedError) throw e;
           console.error("[Aidoku] OLD ABI getChapterList error:", e);
           return [];
         } finally {
@@ -792,6 +801,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
           locked: c.locked || undefined,
         }));
       } catch (e) {
+        if (e instanceof CloudflareBlockedError) throw e;
         console.error("[Aidoku] getChapterList error:", e);
         return [];
       } finally {
@@ -832,6 +842,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
             };
           });
         } catch (e) {
+          if (e instanceof CloudflareBlockedError) throw e;
           console.error("[Aidoku] OLD ABI getPageList error:", e);
           return [];
         } finally {
@@ -869,6 +880,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
           context: p.context || undefined,
         }));
       } catch (e) {
+        if (e instanceof CloudflareBlockedError) throw e;
         console.error("[Aidoku] getPageList error:", e);
         return [];
       } finally {
@@ -1104,6 +1116,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
 
         return { entries, hasNextPage: decoded.hasNextPage };
       } catch (e) {
+        if (e instanceof CloudflareBlockedError) throw e;
         console.error("[Aidoku] getMangaListForListing error:", e);
         return { entries: [], hasNextPage: false };
       } finally {

@@ -26,7 +26,26 @@ const RequestError = {
   RequestError: -10,
   FailedMemoryWrite: -11,
   NotAnImage: -12,
+  CloudflareBlocked: -100, // Custom: Cloudflare challenge detected
 } as const;
+
+/**
+ * Custom error for Cloudflare blocks
+ */
+export class CloudflareBlockedError extends Error {
+  constructor(public url: string, public status: number) {
+    super(`Cloudflare challenge detected for ${url} (status ${status})`);
+    this.name = "CloudflareBlockedError";
+  }
+}
+
+/**
+ * Check if response indicates Cloudflare block
+ */
+function isCloudflareBlocked(status: number, headers: Record<string, string>): boolean {
+  const server = headers["server"] || headers["Server"] || "";
+  return server.toLowerCase() === "cloudflare" && [403, 503, 429].includes(status);
+}
 
 // Default User-Agent for requests
 const DEFAULT_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
@@ -83,6 +102,11 @@ export function createNetImports(store: GlobalStore, httpBridge: HttpBridge) {
         // Store cookies from response (like Swift's HTTPCookieStorage)
         store.storeCookiesFromResponse(req.url, responseHeaders);
 
+        // Check for Cloudflare block
+        if (isCloudflareBlocked(response.status, responseHeaders)) {
+          throw new CloudflareBlockedError(req.url, response.status);
+        }
+
         // Get data as bytes
         let data: Uint8Array;
         if (response.bytes) {
@@ -99,6 +123,10 @@ export function createNetImports(store: GlobalStore, httpBridge: HttpBridge) {
         };
         return 0;
       } catch (error) {
+        // Re-throw CloudflareBlockedError so it can be handled at async layer
+        if (error instanceof CloudflareBlockedError) {
+          throw error;
+        }
         console.error("[net.send] Request failed:", error);
         req.response = {
           data: new Uint8Array(0),
