@@ -5,6 +5,7 @@ import {
   extractAix,
   isAixPackage,
   type AsyncAidokuSource,
+  type AsyncLoadOptions,
   type SourceManifest,
   type Manga,
   type Chapter,
@@ -14,6 +15,29 @@ import {
   type Filter,
   ContentRating,
 } from "@nemu.pm/aidoku-runtime";
+
+// Default agent URL - can be overridden via NEMU_AGENT_URL env var
+const AGENT_URL = process.env.NEMU_AGENT_URL || "http://localhost:19283";
+
+// Check if agent is running
+async function isAgentRunning(): Promise<boolean> {
+  try {
+    const res = await fetch(`${AGENT_URL}/ping`, { signal: AbortSignal.timeout(1000) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// Get load options with agent if available
+async function getLoadOptions(): Promise<AsyncLoadOptions> {
+  if (await isAgentRunning()) {
+    console.log(`[CLI] Using Nemu Agent at ${AGENT_URL}`);
+    return { agentUrl: AGENT_URL };
+  }
+  console.log(`[CLI] Agent not running, using direct HTTP`);
+  return {};
+}
 import {
   fetchAllRegistries,
   findRegistrySource,
@@ -113,7 +137,8 @@ export async function loadSourceById(
   }
 
   const data = fs.readFileSync(info.path);
-  const source = await loadSource(data, info.id, {});
+  const options = await getLoadOptions();
+  const source = await loadSource(data, info.id, options);
 
   return {
     source,
@@ -127,12 +152,14 @@ export async function resolveAndLoadSource(
   config: Config,
   sourceId: string
 ): Promise<LoadedSource> {
+  const options = await getLoadOptions();
+
   // 1. Try local directory first
   if (config.sources) {
     const local = findSource(config.sources, sourceId);
     if (local) {
       const data = fs.readFileSync(local.path);
-      const source = await loadSource(data, local.id, {});
+      const source = await loadSource(data, local.id, options);
       return { source, manifest: source.manifest, path: local.path };
     }
   }
@@ -158,7 +185,7 @@ export async function resolveAndLoadSource(
 
   // 3. Download (or use cache)
   const data = await downloadAix(found.source, found.baseUrl);
-  const source = await loadSource(data, found.source.id, {});
+  const source = await loadSource(data, found.source.id, options);
 
   return {
     source,
