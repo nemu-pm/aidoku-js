@@ -25,6 +25,15 @@ export type CustomFetchFn = (url: string, init: RequestInit) => Promise<Response
 export interface SettingsProvider {
   /** Get current settings values */
   get: () => Record<string, unknown>;
+  /**
+   * Persist a single setting value on behalf of the source.
+   *
+   * Sources may call `defaults.set(key, kind, value)` from WASM (for example,
+   * to store an OAuth token captured inside `handle_notification`). When a
+   * setter is provided, the host is responsible for persisting the value and
+   * keeping its getter in sync.
+   */
+  set?: (key: string, value: unknown) => void;
   /** Subscribe to settings changes */
   subscribe?: (callback: () => void) => () => void;
 }
@@ -98,6 +107,12 @@ export interface AsyncAidokuSource {
   isOnlySearch(): Promise<boolean>;
   handlesBasicLogin(): Promise<boolean>;
   handlesWebLogin(): Promise<boolean>;
+  /** Submit basic (username/password) credentials to the source. */
+  handleBasicLogin(key: string, username: string, password: string): Promise<boolean>;
+  /** Submit captured cookies to the source's web login handler. */
+  handleWebLogin(key: string, cookies: Record<string, string>): Promise<boolean>;
+  /** Deliver a notification payload (e.g. OAuth callback URL) to the source. */
+  handleNotification(notification: string): Promise<void>;
   getHome(): Promise<HomeLayout | null>;
   getHomeWithPartials(onPartial: (layout: HomeLayout) => void): Promise<HomeLayout | null>;
   

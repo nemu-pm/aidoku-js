@@ -63,7 +63,8 @@ class WorkerSource {
     sourceKey: string,
     proxyUrl: string | null,
     initialSettings: Record<string, unknown>,
-    sharedBuffer: SharedArrayBuffer | null = null
+    sharedBuffer: SharedArrayBuffer | null = null,
+    settingsSetter: ((key: string, value: unknown) => void) | null = null
   ): Promise<{ success: boolean; settingsJson?: unknown[]; manifest?: SourceManifest }> {
     try {
       let httpBridge: HttpBridge;
@@ -88,11 +89,19 @@ class WorkerSource {
 
       // Settings getter reads from local store (updated via updateSettings)
       const settingsGetter = (key: string) => this.settings[key];
+      // Keep the worker-local cache in sync when the source writes a value,
+      // and forward the write to the host (via the Comlink proxy setter) so
+      // values persist across reloads.
+      const persistSetting = (key: string, value: unknown) => {
+        this.settings = { ...this.settings, [key]: value };
+        void settingsSetter?.(key, value);
+      };
 
       // Load the source (but don't initialize yet - we need defaults first)
       this.source = await loadSource(new Uint8Array(aixBytes), sourceKey, {
         httpBridge,
         settingsGetter,
+        settingsSetter: persistSetting,
       });
 
       // Extract defaults from settings.json (like iOS Aidoku does)
@@ -209,6 +218,21 @@ class WorkerSource {
 
   handlesWebLogin(): boolean {
     return this.source?.handlesWebLogin ?? false;
+  }
+
+  handleBasicLogin(key: string, username: string, password: string): boolean {
+    if (!this.source) return false;
+    return this.source.handleBasicLogin(key, username, password);
+  }
+
+  handleWebLogin(key: string, cookies: Record<string, string>): boolean {
+    if (!this.source) return false;
+    return this.source.handleWebLogin(key, cookies);
+  }
+
+  handleNotification(notification: string): void {
+    if (!this.source) return;
+    this.source.handleNotification(notification);
   }
 
   getHome(): HomeLayout | null {
