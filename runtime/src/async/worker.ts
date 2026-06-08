@@ -221,9 +221,12 @@ class WorkerSource {
     return this.source.getHomeWithPartials(onPartial);
   }
 
-  modifyImageRequest(url: string): { url: string; headers: Record<string, string> } {
+  modifyImageRequest(
+    url: string,
+    context?: Record<string, string> | null
+  ): { url: string; headers: Record<string, string> } {
     if (!this.source) return { url, headers: {} };
-    return this.source.modifyImageRequest(url);
+    return this.source.modifyImageRequest(url, context);
   }
 
   hasImageProcessor(): boolean {
