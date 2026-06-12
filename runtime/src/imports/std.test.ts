@@ -2,17 +2,6 @@ import { describe, expect, it, afterEach } from "bun:test";
 import { GlobalStore } from "../global-store";
 import { createStdImports } from "./std";
 
-function writeAssemblyScriptString(
-  store: GlobalStore,
-  ptr: number,
-  value: string
-): void {
-  const bytes = new TextEncoder().encode(value);
-  const view = new DataView(store.memory!.buffer);
-  view.setInt32(ptr - 4, bytes.length, true);
-  store.writeBytes(bytes, ptr);
-}
-
 describe("std imports", () => {
   let store: GlobalStore | null = null;
 
@@ -31,22 +20,28 @@ describe("std imports", () => {
     expect(() => (imports.print as (ptr: number, len: number) => void)(32, 5)).not.toThrow();
   });
 
-  it("exposes abort with readable source-scoped errors", () => {
+  it("abort takes no arguments and throws with the last printed message", () => {
     store = new GlobalStore("ja.rawkuma");
     store.setMemory(new WebAssembly.Memory({ initial: 1 }));
     const imports = createStdImports(store) as Record<string, unknown>;
+    const print = imports.print as (ptr: number, len: number) => void;
+    const abort = imports.abort as () => never;
 
-    expect(imports.abort).toBeFunction();
-    writeAssemblyScriptString(store, 64, "boom");
-    writeAssemblyScriptString(store, 128, "src/lib.rs");
+    expect(abort).toBeFunction();
+    // aidoku-rs panic handler: print(panic message) then abort()
+    const message = "panicked at src/lib.rs:12:34";
+    store.writeString(message, 64);
+    print(64, message.length);
 
-    expect(() =>
-      (imports.abort as (msgPtr: number, filePtr: number, line: number, col: number) => never)(
-        64,
-        128,
-        12,
-        34
-      )
-    ).toThrow("[ja.rawkuma] Abort: boom at src/lib.rs:12:34");
+    expect(() => abort()).toThrow(`[ja.rawkuma] Source aborted: ${message}`);
+  });
+
+  it("abort throws even when nothing was printed", () => {
+    store = new GlobalStore("ja.rawkuma");
+    store.setMemory(new WebAssembly.Memory({ initial: 1 }));
+    const imports = createStdImports(store) as Record<string, unknown>;
+    const abort = imports.abort as () => never;
+
+    expect(() => abort()).toThrow("[ja.rawkuma] Source aborted");
   });
 });

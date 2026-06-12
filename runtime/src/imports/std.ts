@@ -32,40 +32,26 @@ function isCheerioNode(value: unknown): boolean {
   return value !== null && typeof value === "object" && "cheerio" in value;
 }
 
-function readAssemblyScriptStringLength(store: GlobalStore, ptr: number): number {
-  if (!store.memory || ptr < 4) return 0;
-  try {
-    const bytes = store.readBytes(ptr - 4, 4);
-    if (bytes && bytes.length === 4) {
-      const len = bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24);
-      if (len > 0 && len < 10000) {
-        return len;
-      }
-    }
-    const singleByte = store.readBytes(ptr - 4, 1);
-    return singleByte?.[0] ?? 0;
-  } catch {
-    return 0;
-  }
-}
-
 export function createStdImports(store: GlobalStore) {
+  // aidoku-rs's panic handler prints the panic message via std.print
+  // immediately before calling std.abort, so remember it for the abort error.
+  let lastPrint: string | null = null;
+
   return {
     // ============ NEW ABI (aidoku-rs) ============
 
     print: (strPtr: number, strLen: number): void => {
       const str = store.readString(strPtr, strLen);
+      lastPrint = str;
       console.log(`[${store.id}]`, str);
     },
 
-    abort: (msgPtr: number, filePtr: number, line: number, col: number): never => {
-      const msgLen = readAssemblyScriptStringLength(store, msgPtr);
-      const msg = msgLen > 0 ? store.readString(msgPtr, msgLen) : "Unknown error";
-
-      const fileLen = readAssemblyScriptStringLength(store, filePtr);
-      const file = fileLen > 0 ? store.readString(filePtr, fileLen) : "Unknown file";
-
-      const error = `[${store.id}] Abort: ${msg} at ${file}:${line}:${col}`;
+    // aidoku-rs: std.abort() takes no arguments; it must not return so the
+    // wasm `unreachable` instruction after the call is never executed.
+    abort: (): never => {
+      const error = lastPrint
+        ? `[${store.id}] Source aborted: ${lastPrint}`
+        : `[${store.id}] Source aborted`;
       console.error(error);
       throw new Error(error);
     },

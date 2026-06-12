@@ -205,6 +205,15 @@ export function createNetImports(store: GlobalStore, httpBridge: HttpBridge) {
       return 0;
     },
 
+    // aidoku-rs: set_timeout(rid, seconds) -> FFIResult
+    set_timeout: (descriptor: number, seconds: number): number => {
+      if (descriptor < 0) return RequestError.InvalidDescriptor;
+      const req = store.requests.get(descriptor);
+      if (!req) return RequestError.InvalidDescriptor;
+      req.timeoutSeconds = seconds;
+      return 0;
+    },
+
     // aidoku-rs: set_body(rid, ptr, len) -> FFIResult
     set_body: (descriptor: number, bodyPtr: number, bodyLen: number): number => {
       if (descriptor < 0) return RequestError.InvalidDescriptor;
