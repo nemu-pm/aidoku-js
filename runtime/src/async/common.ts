@@ -181,8 +181,8 @@ export function createAsyncWrapper(
       return cfRetry(() => source.getHomeWithPartials(onPartial));
     },
 
-    async modifyImageRequest(url) {
-      return source.modifyImageRequest(url);
+    async modifyImageRequest(url, context) {
+      return source.modifyImageRequest(url, context);
     },
 
     async hasImageProcessor() {
@@ -293,4 +293,3 @@ export function resolveCustomFetch(options: {
   // proxyUrl handled differently (URL rewrite vs fetch replacement)
   return undefined;
 }
-

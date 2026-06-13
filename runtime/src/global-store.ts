@@ -8,6 +8,8 @@ export interface WasmRequest {
   method?: string;
   headers: Record<string, string>;
   body?: Uint8Array;
+  /** Request timeout in seconds (aidoku-rs net.set_timeout); advisory for HTTP bridges. */
+  timeoutSeconds?: number;
   response?: WasmResponse;
   createdAt: number;
 }

@@ -101,7 +101,10 @@ export interface AsyncAidokuSource {
   getHome(): Promise<HomeLayout | null>;
   getHomeWithPartials(onPartial: (layout: HomeLayout) => void): Promise<HomeLayout | null>;
   
-  modifyImageRequest(url: string): Promise<{ url: string; headers: Record<string, string> }>;
+  modifyImageRequest(
+    url: string,
+    context?: Record<string, string> | null
+  ): Promise<{ url: string; headers: Record<string, string> }>;
   hasImageProcessor(): Promise<boolean>;
   processPageImage(
     imageData: Uint8Array,

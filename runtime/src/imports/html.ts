@@ -15,6 +15,18 @@ const HtmlError = {
   SwiftSoupError: -6,
 } as const;
 
+// Node kinds matching aidoku-rs html::Kind
+const NodeKind = {
+  Unknown: 0,
+  Node: 1,
+  TextNode: 2,
+  DataNode: 3,
+  Comment: 4,
+  Element: 5,
+  ElementList: 6,
+  Document: 7,
+} as const;
+
 // Extended Cheerio type with API reference
 interface CheerioWithApi extends Cheerio<AnyNode> {
   _cheerioApi?: CheerioAPI;
@@ -420,6 +432,48 @@ export function createHtmlImports(store: GlobalStore) {
       if (!node) return HtmlError.InvalidDescriptor;
       const children = node.children();
       return store.storeStdValue(attachApi(children, node));
+    },
+
+    // Like children, but includes text/comment nodes (aidoku-rs Node::child_nodes)
+    child_nodes: (descriptor: number): number => {
+      if (descriptor < 0) return HtmlError.InvalidDescriptor;
+      const node = getNode(store, descriptor);
+      if (!node) return HtmlError.InvalidDescriptor;
+      const contents = node.contents();
+      return store.storeStdValue(attachApi(contents, node));
+    },
+
+    // aidoku-rs html::Kind ordinal for the node behind a descriptor
+    kind: (descriptor: number): number => {
+      if (descriptor < 0) return HtmlError.InvalidDescriptor;
+      const node = getNode(store, descriptor);
+      if (!node) return HtmlError.InvalidDescriptor;
+      if (node.length !== 1) return NodeKind.ElementList;
+      const el = node[0];
+      switch (el.type) {
+        case "root":
+          return NodeKind.Document;
+        case "text":
+          return NodeKind.TextNode;
+        case "cdata":
+          return NodeKind.DataNode;
+        case "comment":
+          return NodeKind.Comment;
+        case "tag":
+        case "script":
+        case "style":
+          return NodeKind.Element;
+        default:
+          return NodeKind.Node;
+      }
+    },
+
+    remove: (descriptor: number): number => {
+      if (descriptor < 0) return HtmlError.InvalidDescriptor;
+      const node = getNode(store, descriptor);
+      if (!node) return HtmlError.InvalidDescriptor;
+      node.remove();
+      return 0;
     },
 
     siblings: (descriptor: number): number => {

@@ -203,8 +203,8 @@ export async function loadSource(
       return workerSource.getHomeWithPartials(Comlink.proxy(onPartial));
     },
 
-    async modifyImageRequest(url) {
-      return workerSource.modifyImageRequest(url);
+    async modifyImageRequest(url, context) {
+      return workerSource.modifyImageRequest(url, context);
     },
 
     async hasImageProcessor() {

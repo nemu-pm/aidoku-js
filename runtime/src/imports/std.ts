@@ -33,8 +33,28 @@ function isCheerioNode(value: unknown): boolean {
 }
 
 export function createStdImports(store: GlobalStore) {
+  // aidoku-rs's panic handler prints the panic message via std.print
+  // immediately before calling std.abort, so remember it for the abort error.
+  let lastPrint: string | null = null;
+
   return {
     // ============ NEW ABI (aidoku-rs) ============
+
+    print: (strPtr: number, strLen: number): void => {
+      const str = store.readString(strPtr, strLen);
+      lastPrint = str;
+      console.log(`[${store.id}]`, str);
+    },
+
+    // aidoku-rs: std.abort() takes no arguments; it must not return so the
+    // wasm `unreachable` instruction after the call is never executed.
+    abort: (): never => {
+      const error = lastPrint
+        ? `[${store.id}] Source aborted: ${lastPrint}`
+        : `[${store.id}] Source aborted`;
+      console.error(error);
+      throw new Error(error);
+    },
 
     // Destroy a descriptor (free resources) - unified for all resource types
     destroy: (descriptor: number): void => {
@@ -705,4 +725,3 @@ function parseDateWithFormat(str: string, format: string, tz: string | null): Da
 }
 
 export { parseDateWithFormat, parseRelativeDate, convertFormat };
-
