@@ -427,10 +427,13 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
 
       return finalLayout.components.length > 0 ? finalLayout : null;
     } catch (e) {
-      if (e instanceof CloudflareBlockedError) throw e;
-      console.error("[Aidoku] getHome error:", e);
+      // Surface the failure instead of collapsing it into `null`: callers use
+      // `null` to mean "this source has no home page", and a swallowed network
+      // timeout or WASM trap used to render exactly like that, with no way to
+      // retry. Cleanup still runs so a later call starts from a clean store.
       store.onPartialHomeBytes = null;
-      return null;
+      store.partialHomeResultBytes = [];
+      throw e;
     }
   }
 
