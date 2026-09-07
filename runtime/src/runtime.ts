@@ -274,6 +274,11 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
   const oldModifyImageRequest = exports.modify_image_request as
     | ((requestDescriptor: number) => void)
     | undefined;
+  // Legacy listing entry point. Distinct from the legacy `get_manga_list`,
+  // which is the search/filter entry point in the old ABI.
+  const oldGetMangaListing = exports.get_manga_listing as
+    | ((listingDescriptor: number, page: number) => number)
+    | undefined;
 
   // Login handlers (static detection for registry metadata)
   const handleBasicLogin = exports.handle_basic_login as
@@ -445,7 +450,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
     hasImageProcessor: !!processPageImageExport,
     hasImageRequestProvider: !!getImageRequest,
     hasHome: !!getHome,
-    hasListingProvider: !!getMangaList && isNewAbi,
+    hasListingProvider: detectListingProvider(exports, mode),
     hasDynamicListings: !!getListings,
     handlesBasicLogin: !!handleBasicLogin,
     handlesWebLogin: !!handleWebLogin,
@@ -520,41 +525,10 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
             return { entries: [], hasNextPage: false };
           }
 
-          const result = store.readStdValue(resultDescriptor) as {
-            entries?: unknown[];
-            hasNextPage?: boolean;
-          } | null;
+          const result = store.readStdValue(resultDescriptor);
           store.removeStdValue(resultDescriptor);
 
-          if (!result) {
-            return { entries: [], hasNextPage: false };
-          }
-
-          const mangaArray = result.entries || [];
-          const entries: Manga[] = mangaArray.map((m: unknown) => {
-            const manga = m as Record<string, unknown>;
-            return {
-              sourceId: manifest.info.id,
-              id: String(manga.key || manga.id || ""),
-              key: String(manga.key || manga.id || ""),
-              title: manga.title as string | undefined,
-              authors: manga.author
-                ? [manga.author as string]
-                : (manga.authors as string[] | undefined),
-              artists: manga.artist
-                ? [manga.artist as string]
-                : (manga.artists as string[] | undefined),
-              description: manga.description as string | undefined,
-              tags: manga.tags as string[] | undefined,
-              cover: manga.cover as string | undefined,
-              url: manga.url as string | undefined,
-              status: manga.status as MangaStatus | undefined,
-              nsfw: (manga.nsfw ?? manga.contentRating) as ContentRating | undefined,
-              viewer: manga.viewer as Viewer | undefined,
-            };
-          });
-
-          return { entries, hasNextPage: result.hasNextPage ?? false };
+          return decodeLegacyMangaPageResult(result, manifest.info.id);
         } catch (e) {
           console.error("[Aidoku] OLD ABI getSearchMangaList error:", e);
           throw e;
@@ -1080,7 +1054,23 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
     },
 
     getMangaListForListing(listing: Listing, page: number): MangaPageResult {
-      if (!getMangaList || !isNewAbi) {
+      // OLD ABI: legacy sources declare their listings in source.json and
+      // export `get_manga_listing`, which matches on the listing name.
+      if (!isNewAbi) {
+        if (!oldGetMangaListing) {
+          return { entries: [], hasNextPage: false };
+        }
+        return callLegacyMangaListing(
+          store,
+          oldGetMangaListing,
+          listing,
+          page,
+          manifest.info.id
+        );
+      }
+
+      // NEW ABI
+      if (!getMangaList) {
         return { entries: [], hasNextPage: false };
       }
 
@@ -1182,3 +1172,122 @@ function decodeListingForVec(bytes: Uint8Array, offset: number): [Listing, numbe
   return [{ id, name, kind }, pos];
 }
 
+/**
+ * Whether a source can serve listing-based browsing.
+ *
+ * NEW ABI (aidoku-rs) sources implement `ListingProvider` as `get_manga_list`.
+ * Legacy (Aidoku 0.x) sources export `get_manga_listing` instead - their
+ * `get_manga_list` export is the search/filter entry point, so it must not be
+ * mistaken for a listing provider.
+ */
+export function detectListingProvider(
+  exports: Record<string, WebAssembly.ExportValue>,
+  mode: RuntimeMode
+): boolean {
+  return mode === RuntimeMode.AidokuRs
+    ? typeof exports.get_manga_list === "function"
+    : typeof exports.get_manga_listing === "function";
+}
+
+/**
+ * Build the std object value a legacy `get_manga_listing` reads its listing from.
+ *
+ * aidoku-rs 0.x (`legacy` branch, `crates/proc_macros/src/lib.rs`) generates:
+ *
+ * ```rust
+ * pub unsafe extern "C" fn __wasm_get_manga_listing(listing_rid: i32, page: i32) -> i32 {
+ *     let name = match ObjectRef(ValueRef::new(listing_rid)).get("name").as_string() { ... };
+ *     let listing = Listing { name };
+ *     ...
+ * }
+ * ```
+ *
+ * so `name` is the only key it needs (and it bails out with -1 when the key is
+ * not a string). `flags` mirrors the Swift-era host object
+ * (`Aidoku/Core/Library/Legacy/Listing.swift`, where it is unused) and is
+ * harmless for sources that read it.
+ */
+export function buildLegacyListingValue(listing: Listing): Record<string, unknown> {
+  return { name: listing.name, flags: 0 };
+}
+
+/**
+ * Decode a legacy `MangaPageResult` std value into the host `MangaPageResult`.
+ *
+ * `aidoku.create_manga_result` stores `{ entries, hasNextPage }`, and the manga
+ * objects it holds come from `aidoku.create_manga`, which uses the Swift-era key
+ * names (`id`, `author`, `artist`, `nsfw`). Shared by the legacy search
+ * (`get_manga_list`) and listing (`get_manga_listing`) paths.
+ */
+export function decodeLegacyMangaPageResult(
+  value: unknown,
+  sourceId: string
+): MangaPageResult {
+  const result = value as { entries?: unknown[]; hasNextPage?: boolean } | null | undefined;
+
+  if (!result) {
+    return { entries: [], hasNextPage: false };
+  }
+
+  const mangaArray = result.entries || [];
+  const entries: Manga[] = mangaArray.map((m: unknown) => {
+    const manga = m as Record<string, unknown>;
+    return {
+      sourceId,
+      id: String(manga.key || manga.id || ""),
+      key: String(manga.key || manga.id || ""),
+      title: manga.title as string | undefined,
+      authors: manga.author
+        ? [manga.author as string]
+        : (manga.authors as string[] | undefined),
+      artists: manga.artist
+        ? [manga.artist as string]
+        : (manga.artists as string[] | undefined),
+      description: manga.description as string | undefined,
+      tags: manga.tags as string[] | undefined,
+      cover: manga.cover as string | undefined,
+      url: manga.url as string | undefined,
+      status: manga.status as MangaStatus | undefined,
+      nsfw: (manga.nsfw ?? manga.contentRating) as ContentRating | undefined,
+      viewer: manga.viewer as Viewer | undefined,
+    };
+  });
+
+  return { entries, hasNextPage: result.hasNextPage ?? false };
+}
+
+/**
+ * Call a legacy `get_manga_listing(listing, page)` export and decode its result.
+ *
+ * Mirrors the descriptor lifecycle of the Swift host
+ * (`Aidoku/Core/Sources/Legacy/SourceActor.swift`): store the listing object,
+ * call, read the result, then release both descriptors.
+ */
+export function callLegacyMangaListing(
+  store: GlobalStore,
+  getMangaListing: (listingDescriptor: number, page: number) => number,
+  listing: Listing,
+  page: number,
+  sourceId: string
+): MangaPageResult {
+  const scope = store.createScope();
+  try {
+    const listingDescriptor = scope.storeValue(buildLegacyListingValue(listing));
+    const resultDescriptor = getMangaListing(listingDescriptor, page);
+
+    if (resultDescriptor < 0) {
+      return { entries: [], hasNextPage: false };
+    }
+
+    const result = store.readStdValue(resultDescriptor);
+    store.removeStdValue(resultDescriptor);
+
+    return decodeLegacyMangaPageResult(result, sourceId);
+  } catch (e) {
+    if (e instanceof CloudflareBlockedError) throw e;
+    console.error("[Aidoku] OLD ABI getMangaListForListing error:", e);
+    return { entries: [], hasNextPage: false };
+  } finally {
+    scope.cleanup();
+  }
+}
