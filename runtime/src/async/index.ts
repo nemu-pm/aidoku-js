@@ -41,7 +41,7 @@ export async function loadSource(
   sourceKey: string,
   options: AsyncLoadOptions = {}
 ): Promise<AsyncAidokuSource> {
-  const { proxyUrl, agentUrl, settings, cloudflareSolver } = options;
+  const { proxyUrl, agentUrl, settings, cloudflareSolver, defaultUserAgent } = options;
   
   // Resolve customFetch: explicit > agentUrl > undefined
   let customFetch: CustomFetchFn | undefined = options.customFetch;
@@ -117,7 +117,8 @@ export async function loadSource(
     sourceKey,
     useSabMode ? null : (proxyUrl ?? null), // Don't use proxyUrl in SAB mode
     initialSettings,
-    sharedBuffer // Will be null if not using SAB mode
+    sharedBuffer, // Will be null if not using SAB mode
+    defaultUserAgent ?? null
   );
 
   if (!result.success || !result.manifest) {
@@ -239,6 +240,10 @@ export async function loadSource(
         responseCode,
         responseHeaders
       );
+    },
+
+    async getDefaultUserAgent() {
+      return workerSource.getDefaultUserAgent();
     },
 
     updateSettings(newSettings) {

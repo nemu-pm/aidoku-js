@@ -31,6 +31,7 @@ import {
   createAidokuImports,
   createJsImports,
   CloudflareBlockedError,
+  resolveDefaultUserAgent,
   type SettingsGetter,
   type SettingsSetter,
 } from "./imports";
@@ -97,6 +98,8 @@ export interface AidokuSource {
   handlesBasicLogin: boolean;
   /** Whether this source handles cookie-based web login */
   handlesWebLogin: boolean;
+  /** User-Agent stamped on requests the source does not set one for */
+  defaultUserAgent: string;
   initialize(): void;
   getSearchMangaList(query: string | null, page: number, filters: FilterValue[]): MangaPageResult;
   getMangaDetails(manga: Manga): Manga;
@@ -149,6 +152,16 @@ export interface AidokuRuntimeOptions {
   settingsSetter?: SettingsSetter;
   /** Canvas module for image operations (auto-detected, but can be overridden) */
   canvasModule?: CanvasModule;
+  /**
+   * Default User-Agent for source requests.
+   *
+   * Defaults to the runtime's built-in `DEFAULT_USER_AGENT`. Hosts whose
+   * Cloudflare challenges are solved in a platform WebView should pass that
+   * WebView's User-Agent, since a clearance cookie is bound to it. Invalid
+   * values (empty, over 512 characters, or carrying control characters) fall
+   * back to the built-in default.
+   */
+  defaultUserAgent?: string;
 }
 
 /**
@@ -198,6 +211,9 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
     options: AidokuRuntimeOptions
   ): Promise<AidokuSource> {
     const { httpBridge, settingsGetter = () => undefined, settingsSetter, canvasModule = defaultCanvasModule } = options;
+    // Resolved once so the source, its requests and its image requests all
+    // report the same User-Agent.
+    const defaultUserAgent = resolveDefaultUserAgent(options.defaultUserAgent);
     const { createCanvasImports, createHostImage, getHostImageData } = canvasModule;
     const store = new GlobalStore(sourceKey);
 
@@ -236,7 +252,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
   const importObject: WebAssembly.Imports = {
     env: createEnvImports(store),
     std: createStdImports(store),
-    net: createNetImports(store, httpBridge),
+    net: createNetImports(store, httpBridge, { defaultUserAgent }),
     html: createHtmlImports(store),
     json: createJsonImports(store),
     defaults: createDefaultsImports(store, settingsGetter, settingsSetter),
@@ -552,6 +568,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
     hasDynamicListings: !!getListings,
     handlesBasicLogin: !!handleBasicLogin,
     handlesWebLogin: !!handleWebLogin,
+    defaultUserAgent,
 
     initialize() {
       if (start) {
@@ -993,8 +1010,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
       context?: Record<string, string> | null
     ): { url: string; headers: Record<string, string> } {
       const defaultHeaders: Record<string, string> = {
-        "User-Agent":
-          "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+        "User-Agent": defaultUserAgent,
       };
       const storedCookies = store.getCookiesForUrl(url);
       if (storedCookies) {

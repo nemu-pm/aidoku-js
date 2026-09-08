@@ -3,7 +3,13 @@
  */
 export { createEnvImports } from "./env";
 export { createStdImports } from "./std";
-export { createNetImports, CloudflareBlockedError } from "./net";
+export {
+  createNetImports,
+  CloudflareBlockedError,
+  DEFAULT_USER_AGENT,
+  resolveDefaultUserAgent,
+  type NetImportsOptions,
+} from "./net";
 export { createHtmlImports } from "./html";
 export { createJsonImports } from "./json";
 export { createDefaultsImports, type SettingsGetter, type SettingsSetter } from "./defaults";

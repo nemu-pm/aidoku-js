@@ -89,6 +89,26 @@ const source = await loadSource(aixBytes, "my-source", {
 `isCloudflareChallengeResponse(status, headers, body?)` is exported for hosts
 that do their own HTTP.
 
+## Default User-Agent
+
+Every request a source makes — and the headers `modifyImageRequest` returns —
+carry `DEFAULT_USER_AGENT` unless the source sets its own `User-Agent`. A
+Cloudflare clearance cookie is bound to the exact User-Agent that solved the
+challenge, so a host that solves challenges in a platform WebView should pass
+that WebView's User-Agent:
+
+```typescript
+const source = await loadSource(aixBytes, "my-source", {
+  defaultUserAgent: navigator.userAgent,
+});
+
+await source.getDefaultUserAgent(); // the UA actually in use
+```
+
+The value is trimmed; empty strings, values over 512 characters and values
+carrying control characters fall back to the exported `DEFAULT_USER_AGENT`. The
+sync API takes the same option and exposes `source.defaultUserAgent`.
+
 ## Unsupported imports
 
 Webviews are not available, so these `js` imports exist for instantiation only

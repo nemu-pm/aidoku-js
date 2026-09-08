@@ -47,7 +47,7 @@ export async function loadSource(
   sourceKey: string,
   options: AsyncLoadOptions = {}
 ): Promise<AsyncAidokuSource> {
-  const { proxyUrl, agentUrl, settings, cloudflareSolver } = options;
+  const { proxyUrl, agentUrl, settings, cloudflareSolver, defaultUserAgent } = options;
 
   // Get user settings (will be merged with defaults)
   const userSettings = settings?.get() ?? {};
@@ -70,6 +70,7 @@ export async function loadSource(
   const source = await loadSourceSync(input, sourceKey, {
     httpBridge,
     settingsGetter: (key: string) => currentSettings[key],
+    defaultUserAgent,
   });
 
   // Extract defaults from settings.json (like iOS Aidoku does)

@@ -270,6 +270,10 @@ export function createAsyncWrapper(
       );
     },
 
+    async getDefaultUserAgent() {
+      return source.defaultUserAgent;
+    },
+
     updateSettings(newSettings) {
       onSettingsChange?.(newSettings);
     },

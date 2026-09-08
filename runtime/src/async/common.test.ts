@@ -1,12 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import type { AidokuSource } from "../runtime";
 import type { HomeLayout } from "../types";
-import { CloudflareBlockedError } from "../imports/net";
+import { CloudflareBlockedError, DEFAULT_USER_AGENT } from "../imports/net";
 import type { CloudflareChallengeInfo } from "../cloudflare/detect";
 import { createAsyncWrapper, createCfRetry } from "./common";
 
 function createSource(
-  modifyImageRequest: AidokuSource["modifyImageRequest"]
+  modifyImageRequest: AidokuSource["modifyImageRequest"],
+  defaultUserAgent: string = DEFAULT_USER_AGENT
 ): AidokuSource {
   return {
     id: "test.source",
@@ -27,6 +28,7 @@ function createSource(
     hasDynamicListings: false,
     handlesBasicLogin: false,
     handlesWebLogin: false,
+    defaultUserAgent,
     initialize() {},
     getSearchMangaList: () => ({ entries: [], hasNextPage: false }),
     getMangaDetails: (manga) => manga,
@@ -231,5 +233,24 @@ describe("createCfRetry", () => {
 
     expect(await cfRetry(fn)).toBe("ok");
     expect(calls).toBe(2);
+  });
+});
+
+describe("createAsyncWrapper default User-Agent", () => {
+  const noopImageRequest: AidokuSource["modifyImageRequest"] = (url) => ({ url, headers: {} });
+
+  it("exposes the source's built-in default", async () => {
+    const wrapper = createAsyncWrapper(createSource(noopImageRequest), async (fn) => fn());
+    expect(await wrapper.getDefaultUserAgent()).toBe(DEFAULT_USER_AGENT);
+  });
+
+  it("exposes a host-supplied default", async () => {
+    const webViewUserAgent =
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148";
+    const wrapper = createAsyncWrapper(
+      createSource(noopImageRequest, webViewUserAgent),
+      async (fn) => fn()
+    );
+    expect(await wrapper.getDefaultUserAgent()).toBe(webViewUserAgent);
   });
 });

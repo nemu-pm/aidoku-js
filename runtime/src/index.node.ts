@@ -114,6 +114,9 @@ export { GlobalStore } from "./global-store";
 // Errors
 export { CloudflareBlockedError } from "./imports/net";
 
+// Default User-Agent stamped on source requests (override via `defaultUserAgent`)
+export { DEFAULT_USER_AGENT } from "./imports/net";
+
 // Cloudflare challenge detection
 export { isCloudflareChallengeResponse } from "./cloudflare/detect";
 export type {
