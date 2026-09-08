@@ -108,6 +108,15 @@ export async function loadSource(
   // Get initial settings
   const initialSettings = settings?.get() ?? {};
 
+  // Wrap the host's settings.set (if any) as a Comlink proxy so the worker
+  // can forward WASM-triggered writes back to the main thread's persistent
+  // store (e.g. OAuth tokens captured in handle_notification).
+  const settingsSetter = settings?.set
+    ? Comlink.proxy((key: string, value: unknown) => {
+        settings.set?.(key, value);
+      })
+    : null;
+
   // Load source in worker
   // Pass sharedBuffer if using SAB mode
   const result = await workerSource.load(
@@ -115,7 +124,8 @@ export async function loadSource(
     sourceKey,
     useSabMode ? null : (proxyUrl ?? null), // Don't use proxyUrl in SAB mode
     initialSettings,
-    sharedBuffer // Will be null if not using SAB mode
+    sharedBuffer, // Will be null if not using SAB mode
+    settingsSetter
   );
 
   if (!result.success || !result.manifest) {
@@ -191,6 +201,18 @@ export async function loadSource(
 
     async handlesWebLogin() {
       return workerSource.handlesWebLogin();
+    },
+
+    async handleBasicLogin(key, username, password) {
+      return workerSource.handleBasicLogin(key, username, password);
+    },
+
+    async handleWebLogin(key, cookies) {
+      return workerSource.handleWebLogin(key, cookies);
+    },
+
+    async handleNotification(notification) {
+      return workerSource.handleNotification(notification);
     },
 
     async getHome() {
