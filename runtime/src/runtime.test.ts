@@ -2,13 +2,15 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import {
   buildLegacyListingValue,
   callLegacyMangaListing,
+  createLoadSource,
   decodeLegacyMangaPageResult,
   detectListingProvider,
+  type CanvasModule,
 } from "./runtime";
 import { GlobalStore } from "./global-store";
 import { CloudflareBlockedError } from "./imports/net";
-import { RuntimeMode } from "./result-decoder";
-import { ListingKind } from "./types";
+import { AidokuResultError, RuntimeMode } from "./result-decoder";
+import { ListingKind, type HttpBridge, type SourceManifest } from "./types";
 
 /** Stand-in for a WASM export table; only membership/callability matters. */
 function fakeExports(names: string[]): Record<string, WebAssembly.ExportValue> {
@@ -245,6 +247,299 @@ describe("callLegacyMangaListing", () => {
         "zh.mkzhan"
       );
       expect(result).toEqual({ entries: [], hasNextPage: false });
+    } finally {
+      console.error = originalError;
+    }
+  });
+});
+
+
+/** Result pointer whose payload decodes to image ref RID 1. */
+const IMAGE_RESULT_PTR = 16;
+/** Pointer to a Message error buffer. */
+const MESSAGE_RESULT_PTR = 64;
+const MESSAGE_TEXT = "no chapters found";
+
+interface WasmExportSpec {
+  name: string;
+  /** Number of i32 parameters the export takes */
+  arity: 0 | 1 | 2 | 3;
+  /** Constant the export returns */
+  returns: number;
+}
+
+function encodeSignedLeb(value: number): number[] {
+  const out: number[] = [];
+  for (;;) {
+    const byte = value & 0x7f;
+    value >>= 7;
+    const done =
+      (value === 0 && (byte & 0x40) === 0) || (value === -1 && (byte & 0x40) !== 0);
+    out.push(done ? byte : byte | 0x80);
+    if (done) return out;
+  }
+}
+
+/**
+ * Minimal WASM module exporting memory plus the requested functions, each
+ * returning a fixed constant. Two data segments are laid down: a successful
+ * image ref result at IMAGE_RESULT_PTR, and a Message error buffer at
+ * MESSAGE_RESULT_PTR.
+ */
+function buildSourceWasm(specs: WasmExportSpec[]): Uint8Array {
+  const name = (value: string) => [
+    ...encodeSignedLeb(value.length),
+    ...Array.from(new TextEncoder().encode(value)),
+  ];
+  const section = (id: number, content: number[]) => [
+    id,
+    ...encodeSignedLeb(content.length),
+    ...content,
+  ];
+
+  // one type per arity: () -> i32 ... (i32, i32, i32) -> i32
+  const types = section(1, [
+    0x04,
+    ...[0, 1, 2, 3].flatMap((arity) => [
+      0x60,
+      arity,
+      ...new Array(arity).fill(0x7f),
+      0x01,
+      0x7f,
+    ]),
+  ]);
+  const functions = section(3, [specs.length, ...specs.map((spec) => spec.arity)]);
+  const memory = section(5, [0x01, 0x00, 0x01]);
+
+  const exportEntries = [
+    ...name("memory"),
+    0x02,
+    0x00,
+    ...specs.flatMap((spec, index) => [...name(spec.name), 0x00, index]),
+  ];
+  const exports = section(7, [specs.length + 1, ...exportEntries]);
+
+  const bodies = specs.flatMap((spec) => {
+    // i32.const <returns>; end
+    const body = [0x00, 0x41, ...encodeSignedLeb(spec.returns), 0x0b];
+    return [body.length, ...body];
+  });
+  const code = section(10, [specs.length, ...bodies]);
+
+  // [len = 9][cap = 9][zigzag(1) = 0x02]
+  const imageResult = [0x09, 0, 0, 0, 0x09, 0, 0, 0, 0x02];
+  const messageBytes = Array.from(new TextEncoder().encode(MESSAGE_TEXT));
+  const totalLen = 12 + messageBytes.length;
+  // [marker = -1][cap][total_len][utf8 message]
+  const messageResult = [
+    0xff, 0xff, 0xff, 0xff,
+    totalLen, 0, 0, 0,
+    totalLen, 0, 0, 0,
+    ...messageBytes,
+  ];
+  const segment = (offset: number, bytes: number[]) => [
+    0x00,
+    0x41,
+    ...encodeSignedLeb(offset),
+    0x0b,
+    ...encodeSignedLeb(bytes.length),
+    ...bytes,
+  ];
+  const data = section(11, [
+    0x02,
+    ...segment(IMAGE_RESULT_PTR, imageResult),
+    ...segment(MESSAGE_RESULT_PTR, messageResult),
+  ]);
+
+  return new Uint8Array([
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    ...types,
+    ...functions,
+    ...memory,
+    ...exports,
+    ...code,
+    ...data,
+  ]);
+}
+
+const processedImageBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+
+const stubCanvasModule: CanvasModule = {
+  createCanvasImports: () => ({}),
+  createHostImage: async () => ({ rid: 1, width: 2, height: 2 }),
+  getHostImageData: (_store, rid) => (rid === 1 ? processedImageBytes : null),
+};
+
+const stubHttpBridge: HttpBridge = {
+  request: () => ({ status: 0, headers: {}, body: "", bytes: null }),
+};
+
+const stubManifest: SourceManifest = {
+  info: { id: "test.source", name: "Test Source", version: 1 },
+};
+
+function loadWasmSource(specs: WasmExportSpec[]) {
+  return createLoadSource(stubCanvasModule)(
+    { wasmBytes: buildSourceWasm(specs), manifest: stubManifest },
+    "test.source",
+    { httpBridge: stubHttpBridge }
+  );
+}
+
+const testManga = { sourceId: "test.source", id: "m1", key: "m1" };
+const testChapter = { sourceId: "test.source", id: "c1", key: "c1", mangaId: "m1" };
+
+describe("image processors", () => {
+  it("reports a cover processor when the source exports process_cover_image", async () => {
+    const source = await loadWasmSource([
+      { name: "process_cover_image", arity: 1, returns: IMAGE_RESULT_PTR },
+    ]);
+
+    expect(source.hasCoverImageProcessor).toBe(true);
+    expect(source.hasImageProcessor).toBe(false);
+  });
+
+  it("processes a cover image and returns the processed bytes", async () => {
+    const source = await loadWasmSource([
+      { name: "process_cover_image", arity: 1, returns: IMAGE_RESULT_PTR },
+    ]);
+
+    const processed = await source.processCoverImage(
+      new Uint8Array([1, 2, 3]),
+      "https://example.com/cover.jpg",
+      { Referer: "https://example.com" },
+      200,
+      { "content-type": "image/jpeg" }
+    );
+
+    expect(processed).toEqual(processedImageBytes);
+  });
+
+  it("returns null and reports no cover processor when the export is missing", async () => {
+    const source = await loadWasmSource([
+      { name: "process_page_image", arity: 2, returns: IMAGE_RESULT_PTR },
+    ]);
+
+    expect(source.hasCoverImageProcessor).toBe(false);
+    expect(source.hasImageProcessor).toBe(true);
+    expect(
+      await source.processCoverImage(
+        new Uint8Array([1, 2, 3]),
+        "https://example.com/cover.jpg",
+        {},
+        200,
+        {}
+      )
+    ).toBeNull();
+  });
+
+  it("still processes page images with the page context", async () => {
+    const source = await loadWasmSource([
+      { name: "process_page_image", arity: 2, returns: IMAGE_RESULT_PTR },
+    ]);
+
+    const processed = await source.processPageImage(
+      new Uint8Array([1, 2, 3]),
+      { width: "800" },
+      "https://example.com/page.jpg",
+      {},
+      200,
+      {}
+    );
+
+    expect(processed).toEqual(processedImageBytes);
+  });
+
+  it("reports no processors for a source exporting neither", async () => {
+    const source = await loadWasmSource([]);
+
+    expect(source.hasImageProcessor).toBe(false);
+    expect(source.hasCoverImageProcessor).toBe(false);
+  });
+});
+
+describe("source error results", () => {
+  it("rejects a failed search with the error code", async () => {
+    const source = await loadWasmSource([
+      { name: "get_search_manga_list", arity: 3, returns: -3 },
+    ]);
+
+    expect(() => source.getSearchMangaList("query", 1, [])).toThrow(AidokuResultError);
+    try {
+      source.getSearchMangaList("query", 1, []);
+    } catch (e) {
+      expect((e as AidokuResultError).code).toBe(-3);
+      expect((e as AidokuResultError).message).toBe("Request error");
+    }
+  });
+
+  it("rejects manga details with the message the source returned", async () => {
+    const source = await loadWasmSource([
+      { name: "get_manga_update", arity: 3, returns: MESSAGE_RESULT_PTR },
+    ]);
+
+    expect(() => source.getMangaDetails(testManga)).toThrow(MESSAGE_TEXT);
+    try {
+      source.getMangaDetails(testManga);
+    } catch (e) {
+      expect(e).toBeInstanceOf(AidokuResultError);
+      expect((e as AidokuResultError).code).toBe(-1);
+    }
+  });
+
+  it("rejects a chapter list with the message the source returned", async () => {
+    const source = await loadWasmSource([
+      { name: "get_manga_update", arity: 3, returns: MESSAGE_RESULT_PTR },
+    ]);
+
+    expect(() => source.getChapterList(testManga)).toThrow(MESSAGE_TEXT);
+  });
+
+  it("rejects a page list with the error code", async () => {
+    const source = await loadWasmSource([
+      { name: "get_page_list", arity: 2, returns: -2 },
+    ]);
+
+    try {
+      source.getPageList(testManga, testChapter);
+      throw new Error("expected a source error");
+    } catch (e) {
+      expect(e).toBeInstanceOf(AidokuResultError);
+      expect((e as AidokuResultError).code).toBe(-2);
+      expect((e as AidokuResultError).message).toBe("Unimplemented");
+    }
+  });
+
+  it("rejects a listing with the error code", async () => {
+    const source = await loadWasmSource([
+      { name: "get_manga_list", arity: 2, returns: -3 },
+    ]);
+
+    expect(source.mode).toBe(RuntimeMode.AidokuRs);
+    expect(() =>
+      source.getMangaListForListing({ id: "popular", name: "Popular" }, 1)
+    ).toThrow(AidokuResultError);
+  });
+
+  it("rejects a home layout with the message the source returned", async () => {
+    const source = await loadWasmSource([
+      { name: "get_home", arity: 0, returns: MESSAGE_RESULT_PTR },
+    ]);
+
+    expect(() => source.getHome()).toThrow(MESSAGE_TEXT);
+  });
+
+  it("keeps filters and listings lenient", async () => {
+    const originalError = console.error;
+    console.error = () => {};
+    try {
+      const source = await loadWasmSource([
+        { name: "get_filters", arity: 0, returns: -3 },
+        { name: "get_listings", arity: 0, returns: -3 },
+      ]);
+
+      expect(source.getFilters()).toEqual([]);
+      expect(source.getListings()).toEqual([]);
     } finally {
       console.error = originalError;
     }

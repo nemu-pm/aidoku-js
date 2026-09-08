@@ -6,6 +6,11 @@ import { load as cheerioLoad, type Cheerio, type CheerioAPI } from "cheerio";
 import type { AnyNode } from "domhandler";
 import type { GlobalStore } from "../global-store";
 import type { HttpBridge } from "../types";
+import {
+  hostFromUrl,
+  isCloudflareChallengeResponse,
+  type CloudflareChallengeInfo,
+} from "../cloudflare/detect";
 
 // Extended Cheerio type with API reference
 interface CheerioWithApi extends Cheerio<AnyNode> {
@@ -30,27 +35,132 @@ const RequestError = {
 } as const;
 
 /**
- * Custom error for Cloudflare blocks
+ * Custom error for Cloudflare challenges
+ *
+ * Carries the host and the request User-Agent because a clearance cookie is
+ * bound to both, so a solver has to reuse them.
  */
 export class CloudflareBlockedError extends Error {
-  constructor(public url: string, public status: number) {
+  /** Host of the challenged URL */
+  readonly host: string;
+  /** User-Agent sent with the challenged request */
+  readonly userAgent?: string;
+
+  constructor(
+    public url: string,
+    public status: number,
+    options: { host?: string; userAgent?: string } = {}
+  ) {
     super(`Cloudflare challenge detected for ${url} (status ${status})`);
     this.name = "CloudflareBlockedError";
+    this.host = options.host ?? hostFromUrl(url);
+    this.userAgent = options.userAgent;
+  }
+
+  /** Challenge details for a solver. */
+  get challengeInfo(): CloudflareChallengeInfo {
+    return {
+      url: this.url,
+      status: this.status,
+      host: this.host,
+      userAgent: this.userAgent,
+    };
   }
 }
 
-/**
- * Check if response indicates Cloudflare block
- */
-function isCloudflareBlocked(status: number, headers: Record<string, string>): boolean {
-  const server = headers["server"] || headers["Server"] || "";
-  return server.toLowerCase() === "cloudflare" && [403, 503, 429].includes(status);
+/** Read the User-Agent from request headers regardless of casing. */
+function getRequestUserAgent(headers: Record<string, string>): string | undefined {
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === "user-agent") {
+      return value;
+    }
+  }
+  return undefined;
 }
 
 // Default User-Agent for requests
 const DEFAULT_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 
 export function createNetImports(store: GlobalStore, httpBridge: HttpBridge) {
+  const send = (descriptor: number): number => {
+    if (descriptor < 0) return RequestError.InvalidDescriptor;
+    const req = store.requests.get(descriptor);
+    if (!req) return RequestError.InvalidDescriptor;
+    if (!req.url) return RequestError.MissingUrl;
+
+    // Add stored cookies for this URL
+    const storedCookies = store.getCookiesForUrl(req.url);
+    if (storedCookies) {
+      // Merge with existing cookies if any (stored cookies first, then request's existing)
+      const existingCookie = req.headers["Cookie"];
+      req.headers["Cookie"] = existingCookie
+        ? `${storedCookies}; ${existingCookie}`
+        : storedCookies;
+    }
+
+    try {
+      // Use the HttpBridge to make the request
+      const response = httpBridge.request({
+        url: req.url,
+        method: req.method || "GET",
+        headers: req.headers,
+        body: req.body ? new TextDecoder().decode(req.body) : null,
+      });
+
+      // Parse response headers
+      const responseHeaders: Record<string, string> = {};
+      for (const [key, value] of Object.entries(response.headers)) {
+        const headerKey = key.toLowerCase();
+        // Join multiple values with comma
+        if (responseHeaders[headerKey]) {
+          responseHeaders[headerKey] += ", " + value;
+        } else {
+          responseHeaders[headerKey] = value;
+        }
+      }
+
+      // Store cookies from response
+      store.storeCookiesFromResponse(req.url, responseHeaders);
+
+      // Get data as bytes
+      let data: Uint8Array;
+      if (response.bytes) {
+        data = response.bytes;
+      } else {
+        data = new TextEncoder().encode(response.body);
+      }
+
+      // A challenge is only retryable once the body confirms it, so detection
+      // needs the response data.
+      if (isCloudflareChallengeResponse(response.status, responseHeaders, data)) {
+        throw new CloudflareBlockedError(req.url, response.status, {
+          userAgent: getRequestUserAgent(req.headers),
+        });
+      }
+
+      req.response = {
+        data,
+        statusCode: response.status,
+        headers: responseHeaders,
+        bytesRead: 0,
+      };
+      return 0;
+    } catch (error) {
+      // Re-throw CloudflareBlockedError so it can be handled at async layer
+      if (error instanceof CloudflareBlockedError) {
+        throw error;
+      }
+      console.error("[net.send] Request failed:", error);
+      req.response = {
+        data: new Uint8Array(0),
+        statusCode: 0,
+        headers: {},
+        bytesRead: 0,
+      };
+      return RequestError.RequestError;
+    }
+  };
+
   return {
     init: (method: number): number => {
       const id = store.createRequest(method);
@@ -62,81 +172,7 @@ export function createNetImports(store: GlobalStore, httpBridge: HttpBridge) {
       return id;
     },
 
-    send: (descriptor: number): number => {
-      if (descriptor < 0) return RequestError.InvalidDescriptor;
-      const req = store.requests.get(descriptor);
-      if (!req) return RequestError.InvalidDescriptor;
-      if (!req.url) return RequestError.MissingUrl;
-
-      // Add stored cookies for this URL (like Swift's HTTPCookieStorage)
-      const storedCookies = store.getCookiesForUrl(req.url);
-      if (storedCookies) {
-        // Merge with existing cookies if any (stored cookies first, then request's existing)
-        const existingCookie = req.headers["Cookie"];
-        req.headers["Cookie"] = existingCookie
-          ? `${storedCookies}; ${existingCookie}`
-          : storedCookies;
-      }
-
-      try {
-        // Use the HttpBridge to make the request
-        const response = httpBridge.request({
-          url: req.url,
-          method: req.method || "GET",
-          headers: req.headers,
-          body: req.body ? new TextDecoder().decode(req.body) : null,
-        });
-
-        // Parse response headers
-        const responseHeaders: Record<string, string> = {};
-        for (const [key, value] of Object.entries(response.headers)) {
-          const headerKey = key.toLowerCase();
-          // Join multiple values with comma (like reference runner)
-          if (responseHeaders[headerKey]) {
-            responseHeaders[headerKey] += ", " + value;
-          } else {
-            responseHeaders[headerKey] = value;
-          }
-        }
-
-        // Store cookies from response (like Swift's HTTPCookieStorage)
-        store.storeCookiesFromResponse(req.url, responseHeaders);
-
-        // Check for Cloudflare block
-        if (isCloudflareBlocked(response.status, responseHeaders)) {
-          throw new CloudflareBlockedError(req.url, response.status);
-        }
-
-        // Get data as bytes
-        let data: Uint8Array;
-        if (response.bytes) {
-          data = response.bytes;
-        } else {
-          data = new TextEncoder().encode(response.body);
-        }
-
-        req.response = {
-          data,
-          statusCode: response.status,
-          headers: responseHeaders,
-          bytesRead: 0,
-        };
-        return 0;
-      } catch (error) {
-        // Re-throw CloudflareBlockedError so it can be handled at async layer
-        if (error instanceof CloudflareBlockedError) {
-          throw error;
-        }
-        console.error("[net.send] Request failed:", error);
-        req.response = {
-          data: new Uint8Array(0),
-          statusCode: 0,
-          headers: {},
-          bytesRead: 0,
-        };
-        return RequestError.RequestError;
-      }
-    },
+    send,
 
     // Send multiple requests in parallel (simplified - just sequential for now)
     send_all: (idsPtr: number, len: number): number => {
@@ -149,7 +185,7 @@ export function createNetImports(store: GlobalStore, httpBridge: HttpBridge) {
 
       for (let i = 0; i < len; i++) {
         const rid = view.getInt32(i * 4, true);
-        const result = createNetImports(store, httpBridge).send(rid);
+        const result = send(rid);
         if (result !== 0) {
           // Store error code back in the array
           view.setInt32(i * 4, result, true);

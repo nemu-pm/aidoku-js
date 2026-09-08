@@ -2,7 +2,7 @@
  * Aidoku WASM Runtime
  * Loads and executes Aidoku source modules in JavaScript environments.
  */
-import { GlobalStore } from "./global-store";
+import { GlobalStore, type DescriptorScope } from "./global-store";
 import type {
   Manga,
   Chapter,
@@ -68,6 +68,8 @@ import {
 import {
   readResultPayload,
   decodeRidFromPayload,
+  readResultOrThrow,
+  AidokuResultError,
   RuntimeMode,
   detectRuntimeMode,
 } from "./result-decoder";
@@ -81,6 +83,8 @@ export interface AidokuSource {
   mode: RuntimeMode;
   /** Whether this source has a page image processor (for descrambling) */
   hasImageProcessor: boolean;
+  /** Whether this source has a cover image processor */
+  hasCoverImageProcessor: boolean;
   /** Whether this source provides custom image requests */
   hasImageRequestProvider: boolean;
   /** Whether this source provides a home layout */
@@ -123,6 +127,17 @@ export interface AidokuSource {
     responseCode: number,
     responseHeaders: Record<string, string>
   ): Promise<Uint8Array | null>;
+  /**
+   * Process a cover image.
+   * Only works if hasCoverImageProcessor is true.
+   */
+  processCoverImage(
+    imageData: Uint8Array,
+    requestUrl: string,
+    requestHeaders: Record<string, string>,
+    responseCode: number,
+    responseHeaders: Record<string, string>
+  ): Promise<Uint8Array | null>;
 }
 
 export interface AidokuRuntimeOptions {
@@ -156,6 +171,15 @@ export interface SourceComponents {
  * - string: URL to WASM file (legacy, requires manifest parameter)
  */
 export type SourceInput = ArrayBuffer | Uint8Array | SourceComponents;
+
+/**
+ * Errors a caller has to see: a Cloudflare challenge can be retried after a
+ * solve, and a source error says why a request produced nothing. Anything else
+ * (a WASM trap, a decode bug) still falls back to an empty result.
+ */
+function isPropagatedError(e: unknown): boolean {
+  return e instanceof CloudflareBlockedError || e instanceof AidokuResultError;
+}
 
 /**
  * Create a loadSource function with a specific canvas module.
@@ -250,6 +274,10 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
   const processPageImageExport = exports.process_page_image as
     | ((responseDescriptor: number, contextDescriptor: number) => number)
     | undefined;
+  // Cover processing takes no page context, unlike process_page_image.
+  const processCoverImageExport = exports.process_cover_image as
+    | ((responseDescriptor: number) => number)
+    | undefined;
   const getFilterList = exports.get_filters as (() => number) | undefined;
   const freeResult = exports.free_result as ((ptr: number) => void) | undefined;
   const getHome = exports.get_home as (() => number) | undefined;
@@ -307,6 +335,63 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
       return data.slice();
     } catch {
       return null;
+    }
+  }
+
+  // Shared driver for the image processing exports: encodes the image response,
+  // calls the export and decodes the returned image reference.
+  async function runImageProcessor(
+    imageData: Uint8Array,
+    requestUrl: string,
+    requestHeaders: Record<string, string>,
+    responseCode: number,
+    responseHeaders: Record<string, string>,
+    callExport: (responseDescriptor: number, scope: DescriptorScope) => number
+  ): Promise<Uint8Array | null> {
+    const scope = store.createScope();
+    try {
+      const imageResult = await createHostImage(store, imageData);
+      if (!imageResult) {
+        return null;
+      }
+      const { rid: imageRid } = imageResult;
+
+      const responseBytes = encodeImageResponse(
+        responseCode,
+        responseHeaders,
+        requestUrl,
+        requestHeaders,
+        imageRid
+      );
+      const responseDescriptor = scope.storeValue(responseBytes);
+
+      const resultPtr = callExport(responseDescriptor, scope);
+
+      if (resultPtr < 0) {
+        return null;
+      }
+
+      const payload = readResultPayload(memory, resultPtr);
+
+      if (freeResult && resultPtr > 0) {
+        freeResult(resultPtr);
+      }
+
+      if (!payload || payload.length === 0) {
+        return null;
+      }
+
+      const resultRid = decodeRidFromPayload(payload);
+
+      if (resultRid === null) {
+        return null;
+      }
+
+      return getHostImageData(store, resultRid);
+    } catch {
+      return null;
+    } finally {
+      scope.cleanup();
     }
   }
 
@@ -406,10 +491,18 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
 
       // Call WASM getHome - this will trigger onPartialHomeBytes callbacks synchronously
       const resultPtr = getHome();
-      const resultBytes = readResult(resultPtr);
 
-      if (freeResult && resultPtr > 0) {
-        freeResult(resultPtr);
+      // Hold on to an error result: partial components that already streamed
+      // in are still usable, so it is only surfaced when nothing was produced.
+      let resultBytes: Uint8Array | null = null;
+      let resultError: unknown = null;
+      try {
+        resultBytes = readResultOrThrow(memory, resultPtr, freeResult);
+        if (freeResult && resultPtr > 0) {
+          freeResult(resultPtr);
+        }
+      } catch (e) {
+        resultError = e;
       }
 
       // Clean up callback
@@ -418,6 +511,10 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
 
       // Convert map to array (order preserved as insertion order)
       const partialComponents = Array.from(partialComponentsMap.values());
+
+      if (resultError && partialComponents.length === 0) {
+        throw resultError;
+      }
 
       // Decode final result
       let finalLayout: HomeLayout = { components: [] };
@@ -448,6 +545,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
     mode,
     settingsJson,
     hasImageProcessor: !!processPageImageExport,
+    hasCoverImageProcessor: !!processCoverImageExport,
     hasImageRequestProvider: !!getImageRequest,
     hasHome: !!getHome,
     hasListingProvider: detectListingProvider(exports, mode),
@@ -554,7 +652,8 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
         const filtersDescriptor = scope.storeValue(filtersBytes);
 
         const resultPtr = getSearchMangaList(queryDescriptor, page, filtersDescriptor);
-        const resultBytes = readResult(resultPtr);
+        // Surface source errors instead of reporting an empty result.
+        const resultBytes = readResultOrThrow(memory, resultPtr, freeResult);
 
         if (freeResult && resultPtr > 0) {
           freeResult(resultPtr);
@@ -584,7 +683,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
         return { entries, hasNextPage: decoded.hasNextPage };
       } catch (e) {
         // Re-throw CloudflareBlockedError for async layer to handle
-        if (e instanceof CloudflareBlockedError) throw e;
+        if (isPropagatedError(e)) throw e;
         console.error("[Aidoku] getSearchMangaList error:", e);
         return { entries: [], hasNextPage: false };
       } finally {
@@ -641,7 +740,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
             viewer: (result.viewer as Viewer) ?? manga.viewer,
           };
         } catch (e) {
-          if (e instanceof CloudflareBlockedError) throw e;
+          if (isPropagatedError(e)) throw e;
           console.error("[Aidoku] OLD ABI getMangaDetails error:", e);
           return manga;
         } finally {
@@ -658,7 +757,8 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
         const mangaDescriptor = scope.storeValue(mangaBytes);
 
         const resultPtr = getMangaUpdate(mangaDescriptor, 1, 0);
-        const resultBytes = readResult(resultPtr);
+        // Surface source errors instead of reporting an empty result.
+        const resultBytes = readResultOrThrow(memory, resultPtr, freeResult);
 
         if (freeResult && resultPtr > 0) {
           freeResult(resultPtr);
@@ -683,7 +783,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
           viewer: decoded.viewer as Viewer | undefined,
         };
       } catch (e) {
-        if (e instanceof CloudflareBlockedError) throw e;
+        if (isPropagatedError(e)) throw e;
         console.error("[Aidoku] getMangaDetails error:", e);
         return manga;
       } finally {
@@ -733,7 +833,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
             };
           });
         } catch (e) {
-          if (e instanceof CloudflareBlockedError) throw e;
+          if (isPropagatedError(e)) throw e;
           console.error("[Aidoku] OLD ABI getChapterList error:", e);
           return [];
         } finally {
@@ -750,7 +850,8 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
         const mangaDescriptor = scope.storeValue(mangaBytes);
 
         const resultPtr = getMangaUpdate(mangaDescriptor, 0, 1);
-        const resultBytes = readResult(resultPtr);
+        // Surface source errors instead of reporting an empty result.
+        const resultBytes = readResultOrThrow(memory, resultPtr, freeResult);
 
         if (freeResult && resultPtr > 0) {
           freeResult(resultPtr);
@@ -778,7 +879,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
           locked: c.locked || undefined,
         }));
       } catch (e) {
-        if (e instanceof CloudflareBlockedError) throw e;
+        if (isPropagatedError(e)) throw e;
         console.error("[Aidoku] getChapterList error:", e);
         return [];
       } finally {
@@ -819,7 +920,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
             };
           });
         } catch (e) {
-          if (e instanceof CloudflareBlockedError) throw e;
+          if (isPropagatedError(e)) throw e;
           console.error("[Aidoku] OLD ABI getPageList error:", e);
           return [];
         } finally {
@@ -839,7 +940,8 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
         const chapterDescriptor = scope.storeValue(chapterBytes);
 
         const resultPtr = wasmGetPageList(mangaDescriptor, chapterDescriptor);
-        const resultBytes = readResult(resultPtr);
+        // Surface source errors instead of reporting an empty result.
+        const resultBytes = readResultOrThrow(memory, resultPtr, freeResult);
 
         if (freeResult && resultPtr > 0) {
           freeResult(resultPtr);
@@ -857,7 +959,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
           context: p.context || undefined,
         }));
       } catch (e) {
-        if (e instanceof CloudflareBlockedError) throw e;
+        if (isPropagatedError(e)) throw e;
         console.error("[Aidoku] getPageList error:", e);
         return [];
       } finally {
@@ -1000,57 +1102,42 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
         return null;
       }
 
-      const scope = store.createScope();
-      try {
-        const imageResult = await createHostImage(store, imageData);
-        if (!imageResult) {
-          return null;
+      return runImageProcessor(
+        imageData,
+        requestUrl,
+        requestHeaders,
+        responseCode,
+        responseHeaders,
+        (responseDescriptor, scope) => {
+          let contextDescriptor = -1;
+          if (context !== null) {
+            const contextHashMapBytes = encodeHashMap(context);
+            contextDescriptor = scope.storeValue(contextHashMapBytes);
+          }
+          return processPageImageExport(responseDescriptor, contextDescriptor);
         }
-        const { rid: imageRid } = imageResult;
+      );
+    },
 
-        const responseBytes = encodeImageResponse(
-          responseCode,
-          responseHeaders,
-          requestUrl,
-          requestHeaders,
-          imageRid
-        );
-        const responseDescriptor = scope.storeValue(responseBytes);
-
-        let contextDescriptor = -1;
-        if (context !== null) {
-          const contextHashMapBytes = encodeHashMap(context);
-          contextDescriptor = scope.storeValue(contextHashMapBytes);
-        }
-
-        const resultPtr = processPageImageExport(responseDescriptor, contextDescriptor);
-
-        if (resultPtr < 0) {
-          return null;
-        }
-
-        const payload = readResultPayload(memory, resultPtr);
-
-        if (freeResult && resultPtr > 0) {
-          freeResult(resultPtr);
-        }
-
-        if (!payload || payload.length === 0) {
-          return null;
-        }
-
-        const resultRid = decodeRidFromPayload(payload);
-
-        if (resultRid === null) {
-          return null;
-        }
-
-        return getHostImageData(store, resultRid);
-      } catch {
+    async processCoverImage(
+      imageData: Uint8Array,
+      requestUrl: string,
+      requestHeaders: Record<string, string>,
+      responseCode: number,
+      responseHeaders: Record<string, string>
+    ): Promise<Uint8Array | null> {
+      if (!processCoverImageExport) {
         return null;
-      } finally {
-        scope.cleanup();
       }
+
+      return runImageProcessor(
+        imageData,
+        requestUrl,
+        requestHeaders,
+        responseCode,
+        responseHeaders,
+        (responseDescriptor) => processCoverImageExport(responseDescriptor)
+      );
     },
 
     getMangaListForListing(listing: Listing, page: number): MangaPageResult {
@@ -1080,7 +1167,8 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
         const listingDescriptor = scope.storeValue(listingBytes);
 
         const resultPtr = getMangaList(listingDescriptor, page);
-        const resultBytes = readResult(resultPtr);
+        // Surface source errors instead of reporting an empty result.
+        const resultBytes = readResultOrThrow(memory, resultPtr, freeResult);
 
         if (freeResult && resultPtr > 0) {
           freeResult(resultPtr);
@@ -1109,7 +1197,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
 
         return { entries, hasNextPage: decoded.hasNextPage };
       } catch (e) {
-        if (e instanceof CloudflareBlockedError) throw e;
+        if (isPropagatedError(e)) throw e;
         console.error("[Aidoku] getMangaListForListing error:", e);
         return { entries: [], hasNextPage: false };
       } finally {
@@ -1284,7 +1372,7 @@ export function callLegacyMangaListing(
 
     return decodeLegacyMangaPageResult(result, sourceId);
   } catch (e) {
-    if (e instanceof CloudflareBlockedError) throw e;
+    if (isPropagatedError(e)) throw e;
     console.error("[Aidoku] OLD ABI getMangaListForListing error:", e);
     return { entries: [], hasNextPage: false };
   } finally {

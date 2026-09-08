@@ -30,6 +30,8 @@ import type {
 import type { CanvasModule } from "../runtime";
 import type { AidokuSource } from "../runtime";
 import { extractSettingsDefaults, applyManifestDefaults } from "./common";
+// Keeps error classes intact across the Comlink boundary
+import "./error-transfer";
 
 // Browser canvas module
 const browserCanvasModule: CanvasModule = {
@@ -245,6 +247,27 @@ class WorkerSource {
     return this.source.processPageImage(
       imageData,
       context,
+      requestUrl,
+      requestHeaders,
+      responseCode,
+      responseHeaders
+    );
+  }
+
+  hasCoverImageProcessor(): boolean {
+    return this.source?.hasCoverImageProcessor ?? false;
+  }
+
+  async processCoverImage(
+    imageData: Uint8Array,
+    requestUrl: string,
+    requestHeaders: Record<string, string>,
+    responseCode: number,
+    responseHeaders: Record<string, string>
+  ): Promise<Uint8Array | null> {
+    if (!this.source) return null;
+    return this.source.processCoverImage(
+      imageData,
       requestUrl,
       requestHeaders,
       responseCode,
