@@ -30,6 +30,7 @@ import type {
 import type { CanvasModule } from "../runtime";
 import type { AidokuSource } from "../runtime";
 import { extractSettingsDefaults, applyManifestDefaults } from "./common";
+import { DEFAULT_USER_AGENT } from "../imports/net";
 // Keeps error classes intact across the Comlink boundary
 import "./error-transfer";
 
@@ -53,19 +54,23 @@ class WorkerSource {
   private source: AidokuSource | null = null;
   private settings: Record<string, unknown> = {};
   private settingsDefaults: Record<string, unknown> = {};
+  private defaultUserAgent: string = DEFAULT_USER_AGENT;
 
   /**
    * Load an Aidoku source from AIX bytes
    * 
    * @param sharedBuffer - If provided, use SharedArrayBuffer bridge for HTTP (extension mode)
    *                       If null, use sync XHR with proxyUrl
+   * @param defaultUserAgent - Default User-Agent for source requests; null uses
+   *                           the runtime's built-in default
    */
   async load(
     aixBytes: ArrayBuffer,
     sourceKey: string,
     proxyUrl: string | null,
     initialSettings: Record<string, unknown>,
-    sharedBuffer: SharedArrayBuffer | null = null
+    sharedBuffer: SharedArrayBuffer | null = null,
+    defaultUserAgent: string | null = null
   ): Promise<{ success: boolean; settingsJson?: unknown[]; manifest?: SourceManifest }> {
     try {
       let httpBridge: HttpBridge;
@@ -95,7 +100,9 @@ class WorkerSource {
       this.source = await loadSource(new Uint8Array(aixBytes), sourceKey, {
         httpBridge,
         settingsGetter,
+        defaultUserAgent: defaultUserAgent ?? undefined,
       });
+      this.defaultUserAgent = this.source.defaultUserAgent;
 
       // Extract defaults from settings.json (like iOS Aidoku does)
       this.settingsDefaults = extractSettingsDefaults(this.source.settingsJson);
@@ -134,6 +141,10 @@ class WorkerSource {
 
   getManifest(): SourceManifest | null {
     return this.source?.manifest ?? null;
+  }
+
+  getDefaultUserAgent(): string {
+    return this.defaultUserAgent;
   }
 
   getSearchMangaList(

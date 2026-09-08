@@ -76,6 +76,17 @@ export interface AsyncLoadOptions {
    * over the agent's own solver.
    */
   cloudflareSolver?: CloudflareChallengeSolver;
+
+  /**
+   * Default User-Agent for source requests
+   *
+   * Defaults to the runtime's built-in `DEFAULT_USER_AGENT`. A clearance
+   * cookie is bound to the User-Agent that solved the challenge, so a host
+   * that solves challenges in a platform WebView should pass that WebView's
+   * User-Agent here. Invalid values (empty, over 512 characters, or carrying
+   * control characters) fall back to the built-in default.
+   */
+  defaultUserAgent?: string;
 }
 
 /**
@@ -132,6 +143,9 @@ export interface AsyncAidokuSource {
     responseCode: number,
     responseHeaders: Record<string, string>
   ): Promise<Uint8Array | null>;
+
+  /** Default User-Agent this source stamps on requests */
+  getDefaultUserAgent(): Promise<string>;
 
   /** Update settings (triggers re-read on next WASM call) */
   updateSettings(settings: Record<string, unknown>): void;

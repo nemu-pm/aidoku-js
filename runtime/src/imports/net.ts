@@ -78,10 +78,53 @@ function getRequestUserAgent(headers: Record<string, string>): string | undefine
   return undefined;
 }
 
-// Default User-Agent for requests
-const DEFAULT_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
+/**
+ * Built-in default User-Agent for source requests.
+ *
+ * Hosts that solve Cloudflare challenges in a platform WebView should pass
+ * that WebView's User-Agent instead, since a clearance cookie is bound to it.
+ */
+export const DEFAULT_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 
-export function createNetImports(store: GlobalStore, httpBridge: HttpBridge) {
+/** Longest host-supplied User-Agent accepted; longer values are ignored. */
+const MAX_USER_AGENT_LENGTH = 512;
+
+/** Control characters would corrupt the header, so a value carrying one is rejected. */
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
+
+/**
+ * Resolve the default User-Agent to stamp on requests.
+ *
+ * A non-empty, trimmed, control-character-free string of at most
+ * MAX_USER_AGENT_LENGTH characters replaces the built-in default; anything
+ * else falls back to DEFAULT_USER_AGENT.
+ */
+export function resolveDefaultUserAgent(userAgent?: string): string {
+  if (typeof userAgent !== "string") return DEFAULT_USER_AGENT;
+  const trimmed = userAgent.trim();
+  if (!trimmed || trimmed.length > MAX_USER_AGENT_LENGTH) return DEFAULT_USER_AGENT;
+  if (CONTROL_CHARACTERS.test(trimmed)) return DEFAULT_USER_AGENT;
+  return trimmed;
+}
+
+export interface NetImportsOptions {
+  /**
+   * Default User-Agent stamped on every request the source creates.
+   *
+   * Invalid values fall back to DEFAULT_USER_AGENT. A source that sets its own
+   * `User-Agent` header still overrides this.
+   */
+  defaultUserAgent?: string;
+}
+
+export function createNetImports(
+  store: GlobalStore,
+  httpBridge: HttpBridge,
+  options: NetImportsOptions = {}
+) {
+  const defaultUserAgent = resolveDefaultUserAgent(options.defaultUserAgent);
+
   const send = (descriptor: number): number => {
     if (descriptor < 0) return RequestError.InvalidDescriptor;
     const req = store.requests.get(descriptor);
@@ -167,7 +210,7 @@ export function createNetImports(store: GlobalStore, httpBridge: HttpBridge) {
       // Add default User-Agent like reference runner
       const req = store.requests.get(id);
       if (req) {
-        req.headers["User-Agent"] = DEFAULT_USER_AGENT;
+        req.headers["User-Agent"] = defaultUserAgent;
       }
       return id;
     },

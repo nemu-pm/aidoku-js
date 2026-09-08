@@ -5,10 +5,11 @@ import {
   createLoadSource,
   decodeLegacyMangaPageResult,
   detectListingProvider,
+  type AidokuRuntimeOptions,
   type CanvasModule,
 } from "./runtime";
 import { GlobalStore } from "./global-store";
-import { CloudflareBlockedError } from "./imports/net";
+import { CloudflareBlockedError, DEFAULT_USER_AGENT } from "./imports/net";
 import { AidokuResultError, RuntimeMode } from "./result-decoder";
 import { ListingKind, type HttpBridge, type SourceManifest } from "./types";
 
@@ -378,11 +379,14 @@ const stubManifest: SourceManifest = {
   info: { id: "test.source", name: "Test Source", version: 1 },
 };
 
-function loadWasmSource(specs: WasmExportSpec[]) {
+function loadWasmSource(
+  specs: WasmExportSpec[],
+  options: Partial<AidokuRuntimeOptions> = {}
+) {
   return createLoadSource(stubCanvasModule)(
     { wasmBytes: buildSourceWasm(specs), manifest: stubManifest },
     "test.source",
-    { httpBridge: stubHttpBridge }
+    { httpBridge: stubHttpBridge, ...options }
   );
 }
 
@@ -543,5 +547,35 @@ describe("source error results", () => {
     } finally {
       console.error = originalError;
     }
+  });
+});
+
+describe("default User-Agent", () => {
+  const webViewUserAgent =
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148";
+
+  it("reports the built-in default when the option is omitted", async () => {
+    const source = await loadWasmSource([]);
+    expect(source.defaultUserAgent).toBe(DEFAULT_USER_AGENT);
+  });
+
+  it("reports and uses a host-supplied default", async () => {
+    const source = await loadWasmSource([], { defaultUserAgent: webViewUserAgent });
+
+    expect(source.defaultUserAgent).toBe(webViewUserAgent);
+    // Image requests are fetched by the host, so they carry the same UA as
+    // the requests the source makes itself.
+    expect(source.modifyImageRequest("https://example.com/p.jpg").headers["User-Agent"]).toBe(
+      webViewUserAgent
+    );
+  });
+
+  it("falls back to the built-in default for an invalid value", async () => {
+    const source = await loadWasmSource([], { defaultUserAgent: "   " });
+
+    expect(source.defaultUserAgent).toBe(DEFAULT_USER_AGENT);
+    expect(source.modifyImageRequest("https://example.com/p.jpg").headers["User-Agent"]).toBe(
+      DEFAULT_USER_AGENT
+    );
   });
 });
