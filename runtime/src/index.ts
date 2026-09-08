@@ -99,10 +99,28 @@ export {
 export type { SettingsGetter, SettingsSetter } from "./imports/defaults";
 
 // Result decoder utilities
-export { RuntimeMode, detectRuntimeMode } from "./result-decoder";
+export {
+  RuntimeMode,
+  detectRuntimeMode,
+  AidokuResultError,
+  AidokuResultErrorCode,
+  getResultErrorMessage,
+  isResultError,
+} from "./result-decoder";
 
 // GlobalStore (for advanced usage)
 export { GlobalStore } from "./global-store";
 
 // Errors
 export { CloudflareBlockedError } from "./imports/net";
+
+// Comlink error transfer (registered automatically by the browser runtime;
+// exported for hosts that run their own worker)
+export { registerErrorTransferHandlers } from "./async/error-transfer";
+
+// Cloudflare challenge detection
+export { isCloudflareChallengeResponse } from "./cloudflare/detect";
+export type {
+  CloudflareChallengeInfo,
+  CloudflareChallengeSolver,
+} from "./cloudflare/detect";

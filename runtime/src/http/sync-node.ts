@@ -285,12 +285,14 @@ function createAgentBridge(
             } catch {}
           }
           
-          // CF solve failed/timed out - return CF error
+          // CF solve failed/timed out - return a response the challenge
+          // detector recognises, so net.send raises CloudflareBlockedError.
+          const body = `Cloudflare challenge detected for ${req.url} (status ${data.status})`;
           return {
             status: 403,
-            headers: { server: "cloudflare" },
-            body: `Cloudflare challenge detected for ${req.url} (status ${data.status})`,
-            bytes: null,
+            headers: { server: "cloudflare", "cf-mitigated": "challenge" },
+            body,
+            bytes: new TextEncoder().encode(body),
           };
         }
 

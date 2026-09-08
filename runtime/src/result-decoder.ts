@@ -65,7 +65,7 @@ export function decodeZigzagVarint(
 
 /**
  * Decode an i32 RID from a WASM result payload.
- * Used for get_image_request and process_page_image results.
+ * Used for get_image_request, process_page_image and process_cover_image results.
  */
 export function decodeRidFromPayload(payload: Uint8Array): number | null {
   if (!payload || payload.length === 0) {
@@ -81,11 +81,51 @@ export function decodeRidFromPayload(payload: Uint8Array): number | null {
 }
 
 /**
+ * Error result codes returned by a source.
+ *
+ * A source function that fails returns one of these negative codes instead of
+ * a result pointer. `Message` is special: the source allocates a buffer whose
+ * first `i32` is -1 and appends the message text after the header, so the
+ * value seen by the host is a positive pointer with a -1 marker.
+ */
+export const AidokuResultErrorCode = {
+  /** The source passed a message string back to the app. */
+  Message: -1,
+  /** The called function is not implemented by the source. */
+  Unimplemented: -2,
+  /** An HTTP request failed. */
+  RequestError: -3,
+  /** An HTML parsing or selector operation failed. */
+  HtmlError: -4,
+  /** A JavaScript evaluation failed. */
+  JsError: -5,
+  /** A canvas or image operation failed. */
+  CanvasError: -6,
+  /** Response bytes were not valid UTF-8. */
+  Utf8Error: -7,
+  /** JSON parsing failed. */
+  JsonParseError: -8,
+  /** Postcard deserialization failed. */
+  DeserializeError: -9,
+} as const;
+export type AidokuResultErrorCode =
+  (typeof AidokuResultErrorCode)[keyof typeof AidokuResultErrorCode];
+
+const RESULT_ERROR_MESSAGES: Record<number, string> = {
+  [AidokuResultErrorCode.Message]: "Source error",
+  [AidokuResultErrorCode.Unimplemented]: "Unimplemented",
+  [AidokuResultErrorCode.RequestError]: "Request error",
+  [AidokuResultErrorCode.HtmlError]: "HTML parse error",
+  [AidokuResultErrorCode.JsError]: "JavaScript error",
+  [AidokuResultErrorCode.CanvasError]: "Canvas error",
+  [AidokuResultErrorCode.Utf8Error]: "UTF-8 decode error",
+  [AidokuResultErrorCode.JsonParseError]: "JSON parse error",
+  [AidokuResultErrorCode.DeserializeError]: "Deserialize error",
+};
+
+/**
  * Check if a result pointer indicates an error.
- * Error codes from aidoku-rs:
- * -1 = General error
- * -2 = Unimplemented
- * -3 = RequestError
+ * See {@link AidokuResultErrorCode} for the codes a source can return.
  */
 export function isResultError(ptr: number): boolean {
   return ptr < 0;
@@ -93,6 +133,7 @@ export function isResultError(ptr: number): boolean {
 
 /**
  * Get error message from error result pointer.
+ * Returns null for successful (non-negative) results.
  */
 export function getResultErrorMessage(
   _memory: WebAssembly.Memory,
@@ -102,14 +143,105 @@ export function getResultErrorMessage(
     return null;
   }
 
-  // Standard error codes
-  if (ptr === -2) return "Unimplemented";
-  if (ptr === -3) return "Request error";
+  return RESULT_ERROR_MESSAGES[ptr] ?? `Error code: ${ptr}`;
+}
 
-  // For -1, try to read error message from the result pointer
-  // This is complex - the ptr itself is negative, and the actual message
-  // is stored elsewhere. For now, just return a generic error.
-  return `Error code: ${ptr}`;
+/**
+ * An error raised for a negative result code returned by a source.
+ * `code` is one of {@link AidokuResultErrorCode}, so callers can tell an
+ * unimplemented function apart from a failed request without matching strings.
+ */
+export class AidokuResultError extends Error {
+  readonly code: number;
+
+  constructor(code: number, message?: string) {
+    super(message ?? RESULT_ERROR_MESSAGES[code] ?? `Error code: ${code}`);
+    this.name = "AidokuResultError";
+    this.code = code;
+  }
+}
+
+/** Build an {@link AidokuResultError} from a negative result pointer. */
+export function createResultError(
+  memory: WebAssembly.Memory,
+  ptr: number
+): AidokuResultError {
+  return new AidokuResultError(ptr, getResultErrorMessage(memory, ptr) ?? undefined);
+}
+
+/**
+ * Layout of a Message error buffer:
+ * [marker: i32 -1][cap: i32][total_len: i32][utf8 message...]
+ *
+ * The marker sits where a successful result stores its length, so a positive
+ * pointer whose first i32 is -1 carries an error message, not a payload.
+ */
+const MESSAGE_ERROR_MARKER = -1;
+const MESSAGE_ERROR_HEADER_BYTES = 12;
+
+/**
+ * Read the text of a Message error buffer.
+ * Returns null when the pointer does not hold one.
+ */
+export function readResultErrorMessage(
+  memory: WebAssembly.Memory,
+  ptr: number
+): string | null {
+  if (ptr <= 0) {
+    return null;
+  }
+
+  try {
+    const view = new DataView(memory.buffer);
+    if (view.getInt32(ptr, true) !== MESSAGE_ERROR_MARKER) {
+      return null;
+    }
+
+    const totalLen = view.getInt32(ptr + 8, true);
+    if (totalLen <= MESSAGE_ERROR_HEADER_BYTES) {
+      return "";
+    }
+
+    const bytes = new Uint8Array(
+      memory.buffer,
+      ptr + MESSAGE_ERROR_HEADER_BYTES,
+      totalLen - MESSAGE_ERROR_HEADER_BYTES
+    );
+    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read a result payload, raising {@link AidokuResultError} for error results.
+ *
+ * Handles both error shapes: a negative code, and a positive pointer to a
+ * Message buffer, whose text becomes the error message. The error buffer is
+ * released through `freeResult` when one is available, since the caller's own
+ * cleanup is skipped once this throws.
+ */
+export function readResultOrThrow(
+  memory: WebAssembly.Memory,
+  ptr: number,
+  freeResult?: (ptr: number) => void
+): Uint8Array | null {
+  if (ptr < 0) {
+    throw createResultError(memory, ptr);
+  }
+
+  const message = readResultErrorMessage(memory, ptr);
+  if (message !== null) {
+    // Keep the generic fallback only for an empty message.
+    const error = new AidokuResultError(
+      AidokuResultErrorCode.Message,
+      message || undefined
+    );
+    freeResult?.(ptr);
+    throw error;
+  }
+
+  return readResultPayload(memory, ptr);
 }
 
 /** Runtime mode for ABI detection */

@@ -99,13 +99,27 @@ export {
 export type { SettingsGetter, SettingsSetter } from "./imports/defaults";
 
 // Result decoder utilities
-export { RuntimeMode, detectRuntimeMode } from "./result-decoder";
+export {
+  RuntimeMode,
+  detectRuntimeMode,
+  AidokuResultError,
+  AidokuResultErrorCode,
+  getResultErrorMessage,
+  isResultError,
+} from "./result-decoder";
 
 // GlobalStore (for advanced usage)
 export { GlobalStore } from "./global-store";
 
 // Errors
 export { CloudflareBlockedError } from "./imports/net";
+
+// Cloudflare challenge detection
+export { isCloudflareChallengeResponse } from "./cloudflare/detect";
+export type {
+  CloudflareChallengeInfo,
+  CloudflareChallengeSolver,
+} from "./cloudflare/detect";
 
 // Cloudflare bypass via agent
 export { solveViaAgent } from "./cloudflare/agent";

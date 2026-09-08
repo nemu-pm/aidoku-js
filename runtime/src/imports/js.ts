@@ -106,6 +106,51 @@ export function createJsImports(store: GlobalStore) {
   const contexts = new Map<number, JsContext>();
   let nextContextId = 1;
 
+  // Webviews are unsupported here; log the first call per import so a source
+  // relying on one is diagnosable without flooding the console.
+  const loggedUnsupported = new Set<string>();
+  const unsupportedWebview = (name: string): number => {
+    if (!loggedUnsupported.has(name)) {
+      loggedUnsupported.add(name);
+      console.debug(`[js.${name}] Webviews are not supported in this runtime`);
+    }
+    return JsResult.MissingResult;
+  };
+
+  /**
+   * Evaluate JavaScript code in a context.
+   * @param contextRid - Context RID
+   * @param stringPtr - Pointer to JS code string
+   * @param stringLen - Length of JS code string
+   * Returns: String descriptor with result, or negative error code
+   */
+  const contextEval = (contextRid: number, stringPtr: number, stringLen: number): number => {
+    if (stringLen <= 0) {
+      return JsResult.InvalidString;
+    }
+
+    const context = contexts.get(contextRid);
+    if (!context) {
+      console.error(`[js.context_eval] Invalid context: ${contextRid}`);
+      return JsResult.InvalidContext;
+    }
+
+    const code = store.readString(stringPtr, stringLen);
+    if (!code) {
+      return JsResult.InvalidString;
+    }
+
+    console.debug(`[js.context_eval] Evaluating in context ${contextRid}:`, code.slice(0, 100));
+
+    const result = context.eval(code);
+    if (result === null) {
+      return JsResult.MissingResult;
+    }
+
+    // Store result string and return its descriptor
+    return store.storeStdValue(result);
+  };
+
   return {
     /**
      * Create a new JavaScript context
@@ -118,39 +163,15 @@ export function createJsImports(store: GlobalStore) {
       return rid;
     },
 
+    /** Evaluate JavaScript code in a context */
+    context_eval: contextEval,
+
     /**
-     * Evaluate JavaScript code in a context
-     * @param contextRid - Context RID
-     * @param stringPtr - Pointer to JS code string
-     * @param stringLen - Length of JS code string
-     * Returns: String descriptor with result, or negative error code
+     * Evaluate JavaScript code in a context, awaiting a promise result.
+     * Context evaluation here is synchronous, so this behaves exactly like
+     * context_eval: a returned promise is stringified rather than awaited.
      */
-    context_eval: (contextRid: number, stringPtr: number, stringLen: number): number => {
-      if (stringLen <= 0) {
-        return JsResult.InvalidString;
-      }
-
-      const context = contexts.get(contextRid);
-      if (!context) {
-        console.error(`[js.context_eval] Invalid context: ${contextRid}`);
-        return JsResult.InvalidContext;
-      }
-
-      const code = store.readString(stringPtr, stringLen);
-      if (!code) {
-        return JsResult.InvalidString;
-      }
-
-      console.debug(`[js.context_eval] Evaluating in context ${contextRid}:`, code.slice(0, 100));
-
-      const result = context.eval(code);
-      if (result === null) {
-        return JsResult.MissingResult;
-      }
-
-      // Store result string and return its descriptor
-      return store.storeStdValue(result);
-    },
+    context_eval_async: contextEval,
 
     /**
      * Get a variable from a context
@@ -182,18 +203,50 @@ export function createJsImports(store: GlobalStore) {
       return store.storeStdValue(result);
     },
 
-    // Webview stubs (not implemented - return error codes)
-    webview_create: (): number => -1,
-    webview_load: (_webviewRid: number, _requestRid: number): number => -1,
+    // Webview stubs. Every symbol a source may import has to exist, otherwise
+    // WASM instantiation fails, so all of them resolve to a failure code.
+    webview_create: (): number => unsupportedWebview("webview_create"),
+    webview_set_rule_list: (
+      _webviewRid: number,
+      _rulesPtr: number,
+      _rulesLen: number
+    ): number => unsupportedWebview("webview_set_rule_list"),
+    webview_load: (_webviewRid: number, _requestRid: number): number =>
+      unsupportedWebview("webview_load"),
     webview_load_html: (
       _webviewRid: number,
       _htmlPtr: number,
       _htmlLen: number,
       _urlPtr: number,
       _urlLen: number
-    ): number => -1,
-    webview_wait_for_load: (_webviewRid: number): number => -1,
-    webview_eval: (_webviewRid: number, _codePtr: number, _codeLen: number): number => -1,
+    ): number => unsupportedWebview("webview_load_html"),
+    webview_wait_for_load: (_webviewRid: number): number =>
+      unsupportedWebview("webview_wait_for_load"),
+    webview_eval: (_webviewRid: number, _codePtr: number, _codeLen: number): number =>
+      unsupportedWebview("webview_eval"),
+    webview_eval_async: (
+      _webviewRid: number,
+      _codePtr: number,
+      _codeLen: number
+    ): number => unsupportedWebview("webview_eval_async"),
+    webview_add_user_script: (
+      _webviewRid: number,
+      _scriptPtr: number,
+      _scriptLen: number,
+      _atDocumentEnd: number,
+      _forMainFrameOnly: number
+    ): number => unsupportedWebview("webview_add_user_script"),
+    webview_get_cookies: (_webviewRid: number): number =>
+      unsupportedWebview("webview_get_cookies"),
+    webview_delete_cookie: (
+      _webviewRid: number,
+      _namePtr: number,
+      _nameLen: number,
+      _valuePtr: number,
+      _valueLen: number,
+      _domainPtr: number,
+      _domainLen: number
+    ): number => unsupportedWebview("webview_delete_cookie"),
   };
 }
 

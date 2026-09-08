@@ -47,7 +47,7 @@ export async function loadSource(
   sourceKey: string,
   options: AsyncLoadOptions = {}
 ): Promise<AsyncAidokuSource> {
-  const { proxyUrl, agentUrl, settings } = options;
+  const { proxyUrl, agentUrl, settings, cloudflareSolver } = options;
 
   // Get user settings (will be merged with defaults)
   const userSettings = settings?.get() ?? {};
@@ -96,7 +96,7 @@ export async function loadSource(
   }
 
   // Create CF retry wrapper
-  const cfRetry = createCfRetry(agentUrl);
+  const cfRetry = createCfRetry(agentUrl, cloudflareSolver);
 
   // Create and return async wrapper
   return createAsyncWrapper(

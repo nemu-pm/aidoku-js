@@ -18,7 +18,9 @@ import {
   isSharedArrayBufferAvailable,
   type SabHttpRequest,
 } from "../http/sync-sab";
-import { createAgentFetch } from "./common";
+import { createAgentFetch, createCfRetry } from "./common";
+// Keeps error classes intact across the Comlink boundary
+import "./error-transfer";
 
 // Re-export types
 export type { AsyncAidokuSource, AsyncLoadOptions, CustomFetchFn } from "./types";
@@ -39,7 +41,7 @@ export async function loadSource(
   sourceKey: string,
   options: AsyncLoadOptions = {}
 ): Promise<AsyncAidokuSource> {
-  const { proxyUrl, agentUrl, settings } = options;
+  const { proxyUrl, agentUrl, settings, cloudflareSolver } = options;
   
   // Resolve customFetch: explicit > agentUrl > undefined
   let customFetch: CustomFetchFn | undefined = options.customFetch;
@@ -135,6 +137,9 @@ export async function loadSource(
     });
   }
 
+  // Retry network-bound calls after a Cloudflare challenge is cleared
+  const cfRetry = createCfRetry(agentUrl, cloudflareSolver);
+
   // Return async wrapper
   const source: AsyncAidokuSource = {
     id: manifest.info.id,
@@ -142,31 +147,31 @@ export async function loadSource(
     settingsJson,
 
     async getSearchMangaList(query, page, filters) {
-      return workerSource.getSearchMangaList(query, page, filters);
+      return cfRetry(() => workerSource.getSearchMangaList(query, page, filters));
     },
 
     async getMangaDetails(manga) {
-      return workerSource.getMangaDetails(manga);
+      return cfRetry(() => workerSource.getMangaDetails(manga));
     },
 
     async getChapterList(manga) {
-      return workerSource.getChapterList(manga);
+      return cfRetry(() => workerSource.getChapterList(manga));
     },
 
     async getPageList(manga, chapter) {
-      return workerSource.getPageList(manga, chapter);
+      return cfRetry(() => workerSource.getPageList(manga, chapter));
     },
 
     async getFilters() {
-      return workerSource.getFilters();
+      return cfRetry(() => workerSource.getFilters());
     },
 
     async getListings() {
-      return workerSource.getListings();
+      return cfRetry(() => workerSource.getListings());
     },
 
     async getMangaListForListing(listing, page) {
-      return workerSource.getMangaListForListing(listing, page);
+      return cfRetry(() => workerSource.getMangaListForListing(listing, page));
     },
 
     async hasListingProvider() {
@@ -194,13 +199,13 @@ export async function loadSource(
     },
 
     async getHome() {
-      return workerSource.getHome();
+      return cfRetry(() => workerSource.getHome());
     },
 
     async getHomeWithPartials(onPartial: (layout: HomeLayout) => void) {
       // Note: Comlink can proxy callbacks, but for simplicity we call without partials
       // TODO: Implement proper partial streaming via Comlink.proxy
-      return workerSource.getHomeWithPartials(Comlink.proxy(onPartial));
+      return cfRetry(() => workerSource.getHomeWithPartials(Comlink.proxy(onPartial)));
     },
 
     async modifyImageRequest(url, context) {
@@ -215,6 +220,20 @@ export async function loadSource(
       return workerSource.processPageImage(
         imageData,
         context,
+        requestUrl,
+        requestHeaders,
+        responseCode,
+        responseHeaders
+      );
+    },
+
+    async hasCoverImageProcessor() {
+      return workerSource.hasCoverImageProcessor();
+    },
+
+    async processCoverImage(imageData, requestUrl, requestHeaders, responseCode, responseHeaders) {
+      return workerSource.processCoverImage(
+        imageData,
         requestUrl,
         requestHeaders,
         responseCode,

@@ -4,8 +4,13 @@
 import type { SourceManifest, HomeLayout } from "../types";
 import type { AidokuSource } from "../runtime";
 import type { AsyncAidokuSource, CustomFetchFn } from "./types";
-import { CloudflareBlockedError } from "../imports/net";
+import type { CloudflareBlockedError } from "../imports/net";
 import { solveViaAgent } from "../cloudflare/agent";
+import {
+  hostFromUrl,
+  type CloudflareChallengeInfo,
+  type CloudflareChallengeSolver,
+} from "../cloudflare/detect";
 
 /**
  * Extract default values from settings.json structure
@@ -64,35 +69,86 @@ export function applyManifestDefaults(
   }
 }
 
+/** Solve-and-retry rounds allowed for a single call. */
+const MAX_CF_SOLVE_ROUNDS = 2;
+
 /**
  * Create CF retry wrapper
- * Retries failed requests after solving CF challenge via agent
+ *
+ * Retries a failed call after a Cloudflare challenge has been cleared, either
+ * by a caller-supplied solver or by the agent. Concurrent calls blocked by the
+ * same host share one solve, and a call gets up to MAX_CF_SOLVE_ROUNDS rounds,
+ * since a fresh challenge can be issued right after the first clearance.
+ *
+ * @param agentUrl - Agent base URL, used when no solver is given
+ * @param solver - Challenge solver; takes precedence over the agent
  */
 export function createCfRetry(
-  agentUrl?: string
+  agentUrl?: string,
+  solver?: CloudflareChallengeSolver
 ): <T>(fn: () => T) => Promise<T> {
-  return async <T>(fn: () => T): Promise<T> => {
-    try {
-      return fn();
-    } catch (e) {
-      const isCfError = e instanceof Error && e.name === "CloudflareBlockedError";
-      if (!isCfError) throw e;
-      
-      const cfError = e as CloudflareBlockedError;
-      
-      // Try agent CF bypass if available
-      if (agentUrl) {
-        console.log(`[Agent CF] Challenge detected: ${cfError.url}`);
-        const solved = await solveViaAgent(agentUrl, cfError.url);
-        if (solved) {
-          console.log(`[Agent CF] Retrying request...`);
-          return fn();
-        }
-        console.log(`[Agent CF] Failed to solve challenge`);
+  // One in-flight solve per host, so N parallel requests trigger one challenge.
+  const pendingSolves = new Map<string, Promise<boolean>>();
+
+  const solveChallenge = (info: CloudflareChallengeInfo): Promise<boolean> => {
+    const key = info.host || info.url;
+    const pending = pendingSolves.get(key);
+    if (pending) return pending;
+
+    const attempt = (async () => {
+      try {
+        if (solver) return await solver(info);
+        if (agentUrl) return await solveViaAgent(agentUrl, info.url);
+        return false;
+      } catch (e) {
+        console.error(`[CF] Solver failed for ${key}:`, e);
+        return false;
+      } finally {
+        pendingSolves.delete(key);
       }
-      
-      // No agent or agent failed - re-throw the error
-      throw e;
+    })();
+
+    pendingSolves.set(key, attempt);
+    return attempt;
+  };
+
+  return async <T>(fn: () => T): Promise<T> => {
+    let firstError: unknown;
+
+    for (let round = 0; ; round++) {
+      try {
+        return await fn();
+      } catch (e) {
+        const isCfError = e instanceof Error && e.name === "CloudflareBlockedError";
+        if (!isCfError) throw e;
+
+        // Report the challenge that started this, not the last retry's.
+        if (firstError === undefined) firstError = e;
+
+        // No way to solve challenges - behave as if there were no retry.
+        if (!solver && !agentUrl) throw firstError;
+
+        if (round >= MAX_CF_SOLVE_ROUNDS) {
+          console.log(`[CF] Giving up after ${round} solve attempts`);
+          throw firstError;
+        }
+
+        const cfError = e as CloudflareBlockedError;
+        const info: CloudflareChallengeInfo = {
+          url: cfError.url,
+          status: cfError.status,
+          host: cfError.host || hostFromUrl(cfError.url),
+          userAgent: cfError.userAgent,
+        };
+
+        console.log(`[CF] Challenge detected: ${cfError.url}`);
+        const solved = await solveChallenge(info);
+        if (!solved) {
+          console.log(`[CF] Failed to solve challenge`);
+          throw firstError;
+        }
+        console.log(`[CF] Retrying request...`);
+      }
     }
   };
 }
@@ -193,6 +249,20 @@ export function createAsyncWrapper(
       return source.processPageImage(
         imageData,
         context,
+        requestUrl,
+        requestHeaders,
+        responseCode,
+        responseHeaders
+      );
+    },
+
+    async hasCoverImageProcessor() {
+      return source.hasCoverImageProcessor;
+    },
+
+    async processCoverImage(imageData, requestUrl, requestHeaders, responseCode, responseHeaders) {
+      return source.processCoverImage(
+        imageData,
         requestUrl,
         requestHeaders,
         responseCode,

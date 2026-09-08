@@ -1,6 +1,7 @@
 /**
  * Async runtime types
  */
+import type { CloudflareChallengeSolver } from "../cloudflare/detect";
 import type {
   Manga,
   Chapter,
@@ -66,6 +67,15 @@ export interface AsyncLoadOptions {
    * Settings store interface
    */
   settings?: SettingsProvider;
+
+  /**
+   * Cloudflare challenge solver
+   *
+   * Called when a request is blocked by a challenge; resolve true once the
+   * challenge is cleared and the request will be retried. Takes precedence
+   * over the agent's own solver.
+   */
+  cloudflareSolver?: CloudflareChallengeSolver;
 }
 
 /**
@@ -109,6 +119,14 @@ export interface AsyncAidokuSource {
   processPageImage(
     imageData: Uint8Array,
     context: Record<string, string> | null,
+    requestUrl: string,
+    requestHeaders: Record<string, string>,
+    responseCode: number,
+    responseHeaders: Record<string, string>
+  ): Promise<Uint8Array | null>;
+  hasCoverImageProcessor(): Promise<boolean>;
+  processCoverImage(
+    imageData: Uint8Array,
     requestUrl: string,
     requestHeaders: Record<string, string>,
     responseCode: number,
