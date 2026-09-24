@@ -1,12 +1,23 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { createLoadSource, type AidokuSource, type CanvasModule } from "./runtime";
 import { GlobalStore } from "./global-store";
+import { AidokuResultError } from "./result-decoder";
 import { encodeString, encodeVecString } from "./postcard";
 import { buildWasm, framedResult, op, type WasmFunctionSpec } from "./testing/wasm-builder";
 import type { HttpBridge, SourceManifest } from "./types";
 
 const TRUE_RESULT_PTR = 16;
 const FALSE_RESULT_PTR = 32;
+const MESSAGE_RESULT_PTR = 64;
+const MESSAGE_TEXT = "Invalid username or password";
+
+/** A Message error buffer: [marker -1][cap][total_len][utf8 message]. */
+function messageResult(text: string): number[] {
+  const message = Array.from(new TextEncoder().encode(text));
+  const total = 12 + message.length;
+  const i32 = (v: number) => [v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >>> 24) & 0xff];
+  return [...i32(-1), ...i32(total), ...i32(total), ...message];
+}
 
 const stubCanvasModule: CanvasModule = {
   createCanvasImports: () => ({}),
@@ -33,6 +44,7 @@ function loadAuthSource(functions: WasmFunctionSpec[]): Promise<AidokuSource> {
     data: [
       { offset: TRUE_RESULT_PTR, bytes: framedResult([0x01]) },
       { offset: FALSE_RESULT_PTR, bytes: framedResult([0x00]) },
+      { offset: MESSAGE_RESULT_PTR, bytes: messageResult(MESSAGE_TEXT) },
     ],
   });
   return createLoadSource(stubCanvasModule)({ wasmBytes, manifest }, "test.auth", {
@@ -104,14 +116,39 @@ describe("auth handlers", () => {
     expect(recorder.descriptorCount()).toBe(0);
   });
 
-  it("surfaces a failed login as an error with the result message", async () => {
+  /** Run `call`, expecting it to throw an AidokuResultError. */
+  function resultError(call: () => unknown): AidokuResultError {
+    try {
+      call();
+    } catch (e) {
+      expect(e).toBeInstanceOf(AidokuResultError);
+      return e as AidokuResultError;
+    }
+    throw new Error("expected an AidokuResultError");
+  }
+
+  it("surfaces the message a source returns for a failed login", async () => {
+    const source = await loadAuthSource([
+      returning("handle_basic_login", 3, MESSAGE_RESULT_PTR),
+      returning("handle_web_login", 3, MESSAGE_RESULT_PTR),
+    ]);
+
+    const basic = resultError(() => source.handleBasicLogin("login", "alice", "wrong"));
+    expect(basic.message).toBe(MESSAGE_TEXT);
+    expect(basic.code).toBe(-1);
+    expect(resultError(() => source.handleWebLogin("login", {})).message).toBe(MESSAGE_TEXT);
+  });
+
+  it("surfaces a failed login code as a typed error", async () => {
     const source = await loadAuthSource([
       returning("handle_basic_login", 3, -3),
       returning("handle_web_login", 3, -2),
     ]);
 
-    expect(() => source.handleBasicLogin("login", "alice", "pw")).toThrow("Request error");
-    expect(() => source.handleWebLogin("login", {})).toThrow("Unimplemented");
+    const basic = resultError(() => source.handleBasicLogin("login", "alice", "pw"));
+    expect(basic.code).toBe(-3);
+    expect(basic.message).toBe("Request error");
+    expect(resultError(() => source.handleWebLogin("login", {})).message).toBe("Unimplemented");
   });
 
   it("returns false without calling into the source when a login export is missing", async () => {
@@ -129,7 +166,9 @@ describe("auth handlers", () => {
     expect(recorder.descriptorCount()).toBe(0);
 
     const failing = await loadAuthSource([returning("handle_notification", 1, -1)]);
-    expect(() => failing.handleNotification("x")).toThrow("Source error");
+    const error = resultError(() => failing.handleNotification("x"));
+    expect(error.code).toBe(-1);
+    expect(error.message).toBe("Source error");
 
     const missing = await loadAuthSource([]);
     expect(() => missing.handleNotification("x")).not.toThrow();

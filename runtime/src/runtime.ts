@@ -76,7 +76,7 @@ import {
   AidokuResultError,
   RuntimeMode,
   detectRuntimeMode,
-  getResultErrorMessage,
+  createResultError,
 } from "./result-decoder";
 
 export interface AidokuSource {
@@ -106,18 +106,21 @@ export interface AidokuSource {
   /**
    * Submit credentials for a basic (username/password) login flow.
    * Returns `true` if the source accepted the credentials, and `false` when
-   * the source does not export `handle_basic_login`.
+   * the source does not export `handle_basic_login`. Throws an
+   * AidokuResultError carrying the source's message when the login fails.
    */
   handleBasicLogin(key: string, username: string, password: string): boolean;
   /**
    * Submit captured cookies for a web login flow.
    * Returns `true` if the source accepted the session, and `false` when the
-   * source does not export `handle_web_login`.
+   * source does not export `handle_web_login`. Throws an AidokuResultError
+   * carrying the source's message when the login fails.
    */
   handleWebLogin(key: string, cookies: Record<string, string>): boolean;
   /**
    * Deliver a notification (for example an OAuth callback URL) to the source.
-   * A no-op when the source does not export `handle_notification`.
+   * A no-op when the source does not export `handle_notification`. Throws an
+   * AidokuResultError when the source cannot read the notification.
    */
   handleNotification(notification: string): void;
   getSearchMangaList(query: string | null, page: number, filters: FilterValue[]): MangaPageResult;
@@ -382,11 +385,10 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
     }
   }
 
-  function readBooleanResult(resultPtr: number, action: string): boolean {
-    if (resultPtr < 0) {
-      throw new Error(getResultErrorMessage(memory, resultPtr) ?? `${action} failed: ${resultPtr}`);
-    }
-    const payload = readResultPayload(memory, resultPtr);
+  // Login exports return a Result<bool>: a payload, a negative code, or a
+  // pointer to a Message buffer carrying the source's own error text.
+  function readBooleanResult(resultPtr: number): boolean {
+    const payload = readResultOrThrow(memory, resultPtr, freeResult);
     if (freeResult && resultPtr > 0) {
       freeResult(resultPtr);
     }
@@ -397,9 +399,9 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
     return result;
   }
 
-  function assertSuccess(resultCode: number, action: string): void {
+  function assertSuccess(resultCode: number): void {
     if (resultCode < 0) {
-      throw new Error(getResultErrorMessage(memory, resultCode) ?? `${action} failed: ${resultCode}`);
+      throw createResultError(memory, resultCode);
     }
   }
 
@@ -638,7 +640,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
         const usernameDescriptor = scope.storeValue(encodeString(username));
         const passwordDescriptor = scope.storeValue(encodeString(password));
         const resultPtr = handleBasicLoginExport(keyDescriptor, usernameDescriptor, passwordDescriptor);
-        return readBooleanResult(resultPtr, "handle_basic_login");
+        return readBooleanResult(resultPtr);
       } finally {
         scope.cleanup();
       }
@@ -654,7 +656,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
         const keysDescriptor = scope.storeValue(encodeVecString(keys));
         const valuesDescriptor = scope.storeValue(encodeVecString(values));
         const resultPtr = handleWebLoginExport(keyDescriptor, keysDescriptor, valuesDescriptor);
-        return readBooleanResult(resultPtr, "handle_web_login");
+        return readBooleanResult(resultPtr);
       } finally {
         scope.cleanup();
       }
@@ -666,7 +668,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
       try {
         const notificationDescriptor = scope.storeValue(encodeString(notification));
         const resultCode = handleNotificationExport(notificationDescriptor);
-        assertSuccess(resultCode, "handle_notification");
+        assertSuccess(resultCode);
       } finally {
         scope.cleanup();
       }
