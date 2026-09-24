@@ -638,7 +638,9 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
     settingsJson,
     hasImageProcessor: !!processPageImageExport,
     hasCoverImageProcessor: !!processCoverImageExport,
-    hasImageRequestProvider: !!getImageRequest,
+    // Legacy sources rewrite image requests through `modify_image_request`;
+    // hosts gate the hook on this flag, so it has to count both ABIs.
+    hasImageRequestProvider: !!getImageRequest || !!oldModifyImageRequest,
     hasHome: !!getHome,
     hasListingProvider: detectListingProvider(exports, mode),
     hasDynamicListings: !!getListings,

@@ -116,6 +116,16 @@ describe("Cloudflare challenges in lenient calls", () => {
     );
   });
 
+  it("reports the legacy modify_image_request as an image request provider", async () => {
+    const legacy = await load([
+      trapping("get_manga_details", 1, 1),
+      fetching("modify_image_request", 1, 0),
+    ]);
+    expect(legacy.hasImageRequestProvider).toBe(true);
+    const modern = await load([fetching("get_image_request", 2, 1)]);
+    expect(modern.hasImageRequestProvider).toBe(true);
+  });
+
   it("propagates from the image processors", async () => {
     const source = await load([
       fetching("process_page_image", 2, 1),
