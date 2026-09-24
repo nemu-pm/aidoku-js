@@ -86,6 +86,10 @@ export class GlobalStore {
   // Cleanup timer
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
+  // Count allocations so runtimes without an event-loop timer still perform
+  // bounded, opportunistic cleanup.
+  private allocationsSinceCleanup = 0;
+
   // Statistics for debugging
   private stats = {
     totalDescriptorsCreated: 0,
@@ -100,15 +104,46 @@ export class GlobalStore {
   }
 
   private startCleanupTimer(): void {
-    if (typeof globalThis !== "undefined" && !this.cleanupTimer) {
-      this.cleanupTimer = setInterval(() => {
+    // Some embedded engines (AndroidX JavaScriptEngine isolates, for one) have
+    // no timer event loop. Only install the periodic cleanup when the host
+    // supplies both sides of a cancellable interval contract.
+    if (typeof globalThis.setInterval === "function" &&
+      typeof globalThis.clearInterval === "function" &&
+      this.cleanupTimer === null) {
+      this.cleanupTimer = globalThis.setInterval(() => {
         this.performCleanup();
       }, MEMORY_CONFIG.CLEANUP_INTERVAL_MS);
     }
   }
 
+  /**
+   * Run before storing a descriptor or request.
+   *
+   * Every 256th allocation runs a cleanup pass, so stale entries are collected
+   * even without the periodic timer. Reaching MAX_DESCRIPTORS / MAX_REQUESTS
+   * forces a cleanup, and if the store is still full the allocation throws
+   * instead of growing without bound.
+   */
+  private prepareAllocation(kind: "descriptor" | "request"): void {
+    this.allocationsSinceCleanup += 1;
+    if (this.allocationsSinceCleanup >= 256) {
+      this.performCleanup();
+    }
+    const entries = kind === "descriptor" ? this.descriptors : this.requests;
+    const limit = kind === "descriptor"
+      ? MEMORY_CONFIG.MAX_DESCRIPTORS
+      : MEMORY_CONFIG.MAX_REQUESTS;
+    if (entries.size >= limit) {
+      this.performCleanup();
+      if (entries.size >= limit) {
+        throw new Error(`Aidoku runtime ${kind} limit exceeded.`);
+      }
+    }
+  }
+
   /** Perform automatic cleanup of stale descriptors and requests */
   performCleanup(): void {
+    this.allocationsSinceCleanup = 0;
     const now = Date.now();
     let descriptorsCleaned = 0;
     let requestsCleaned = 0;
@@ -199,6 +234,7 @@ export class GlobalStore {
 
   /** Store a value and return its descriptor */
   storeStdValue(value: unknown): number {
+    this.prepareAllocation("descriptor");
     const rid = this.allocateRid();
     this.descriptors.set(rid, {
       value,
@@ -316,6 +352,7 @@ export class GlobalStore {
 
   /** Create a new request */
   createRequest(method: number = 0): number {
+    this.prepareAllocation("request");
     const rid = this.allocateRid();
     // aidoku-rs HttpMethod enum order: Get=0, Post=1, Put=2, Head=3, Delete=4, Patch=5, Options=6, Connect=7, Trace=8
     const methodStr = [
@@ -454,14 +491,17 @@ export class GlobalStore {
     this.requests.clear();
     this.resources.clear();
     this.ridCounter = 0;
+    this.allocationsSinceCleanup = 0;
     this.chapterCounter = 0;
     this.currentManga = "";
   }
 
   /** Destroy the store and clean up resources */
   destroy(): void {
-    if (this.cleanupTimer) {
-      clearInterval(this.cleanupTimer);
+    if (this.cleanupTimer !== null) {
+      if (typeof globalThis.clearInterval === "function") {
+        globalThis.clearInterval(this.cleanupTimer);
+      }
       this.cleanupTimer = null;
     }
     this.reset();

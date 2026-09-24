@@ -402,6 +402,132 @@ describe("GlobalStore", () => {
   });
 });
 
+describe("GlobalStore bounded allocation", () => {
+  const STALE_REQUEST_AGE_MS = 11 * 60 * 1000;
+  let store: GlobalStore;
+  let originalDebug: typeof console.debug;
+
+  beforeEach(() => {
+    store = new GlobalStore("bounded");
+    // performCleanup logs every pass it reclaims something
+    originalDebug = console.debug;
+    console.debug = () => {};
+  });
+
+  afterEach(() => {
+    store.destroy();
+    console.debug = originalDebug;
+  });
+
+  /** Create a request old enough for the age-based cleanup to reclaim. */
+  function staleRequest(): number {
+    const rid = store.createRequest(0);
+    store.requests.get(rid)!.createdAt = Date.now() - STALE_REQUEST_AGE_MS;
+    return rid;
+  }
+
+  it("runs a cleanup pass every 256 allocations without the timer", () => {
+    const rid = staleRequest(); // allocation 1
+    for (let i = 0; i < 254; i++) store.storeStdValue(i); // allocations 2-255
+    expect(store.getRequest(rid)).toBeDefined();
+
+    store.storeStdValue("256th"); // allocation 256 cleans up first
+    expect(store.getRequest(rid)).toBeUndefined();
+  });
+
+  it("restarts the allocation count on reset", () => {
+    for (let i = 0; i < 254; i++) store.storeStdValue(i);
+    store.reset();
+
+    const rid = staleRequest();
+    store.storeStdValue("after reset");
+    // Without the reset this would have been allocation 256.
+    expect(store.getRequest(rid)).toBeDefined();
+  });
+
+  it("throws once the descriptor limit is reached with live descriptors", () => {
+    for (let i = 0; i < 10000; i++) store.storeStdValue(i);
+
+    expect(() => store.storeStdValue("one too many")).toThrow(
+      "Aidoku runtime descriptor limit exceeded."
+    );
+    expect(store.getStats().descriptorCount).toBe(10000);
+  });
+
+  it("reclaims stale requests before refusing a new one", () => {
+    const stale: number[] = [];
+    for (let i = 0; i < 1000; i++) stale.push(store.createRequest(0));
+    for (const id of stale) {
+      store.requests.get(id)!.createdAt = Date.now() - STALE_REQUEST_AGE_MS;
+    }
+
+    const rid = store.createRequest(0);
+    expect(store.getRequest(rid)).toBeDefined();
+    expect(stale.some((id) => store.getRequest(id))).toBe(false);
+  });
+
+  it("throws once the request limit is reached with fresh requests", () => {
+    for (let i = 0; i < 1000; i++) store.createRequest(0);
+
+    expect(() => store.createRequest(0)).toThrow("Aidoku runtime request limit exceeded.");
+  });
+});
+
+describe("GlobalStore cleanup timer", () => {
+  it("installs and cancels the periodic cleanup when timers exist", () => {
+    const originalSetInterval = globalThis.setInterval;
+    const originalClearInterval = globalThis.clearInterval;
+    const cleared: unknown[] = [];
+    const handle = { timer: true };
+    globalThis.setInterval = (() => handle) as unknown as typeof setInterval;
+    globalThis.clearInterval = ((id: unknown) => void cleared.push(id)) as typeof clearInterval;
+    try {
+      const store = new GlobalStore("timers");
+      store.destroy();
+      store.destroy();
+      expect(cleared).toEqual([handle]);
+    } finally {
+      globalThis.setInterval = originalSetInterval;
+      globalThis.clearInterval = originalClearInterval;
+    }
+  });
+
+  it("works without a timer event loop", () => {
+    const originalSetInterval = globalThis.setInterval;
+    const originalClearInterval = globalThis.clearInterval;
+    // Engines like AndroidX JavaScriptEngine isolates have neither.
+    (globalThis as { setInterval?: unknown }).setInterval = undefined;
+    (globalThis as { clearInterval?: unknown }).clearInterval = undefined;
+    try {
+      const store = new GlobalStore("no-timers");
+      const d = store.storeStdValue("value");
+      expect(store.readStdValue(d)).toBe("value");
+      expect(() => store.destroy()).not.toThrow();
+    } finally {
+      globalThis.setInterval = originalSetInterval;
+      globalThis.clearInterval = originalClearInterval;
+    }
+  });
+
+  it("installs no timer when only setInterval exists", () => {
+    const originalSetInterval = globalThis.setInterval;
+    const originalClearInterval = globalThis.clearInterval;
+    let installed = 0;
+    globalThis.setInterval = (() => {
+      installed++;
+      return 1;
+    }) as unknown as typeof setInterval;
+    (globalThis as { clearInterval?: unknown }).clearInterval = undefined;
+    try {
+      new GlobalStore("half-timers").destroy();
+      expect(installed).toBe(0);
+    } finally {
+      globalThis.setInterval = originalSetInterval;
+      globalThis.clearInterval = originalClearInterval;
+    }
+  });
+});
+
 describe("type guards", () => {
   it("isArray should identify arrays", () => {
     expect(isArray([])).toBe(true);
