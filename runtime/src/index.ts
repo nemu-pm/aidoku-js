@@ -83,6 +83,7 @@ export type {
   HttpBridge,
   HttpRequest,
   HttpResponse,
+  RuntimeClock,
 } from "./types";
 
 // Enums

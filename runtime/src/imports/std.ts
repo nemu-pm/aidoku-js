@@ -2,6 +2,7 @@
  * std namespace - standard library functions (new aidoku-rs ABI)
  */
 import type { GlobalStore } from "../global-store";
+import type { RuntimeClock } from "../types";
 import { encodeVecString, decodeString, decodeI64, decodeBool, decodeF32 } from "../postcard";
 
 // Object type enum matching Swift's WasmStd.ObjectType
@@ -32,7 +33,11 @@ function isCheerioNode(value: unknown): boolean {
   return value !== null && typeof value === "object" && "cheerio" in value;
 }
 
-export function createStdImports(store: GlobalStore) {
+export function createStdImports(store: GlobalStore, clock: RuntimeClock = {}) {
+  // Every "now" the source observes comes from here. Date.now is read on each
+  // call rather than captured, so a host that replaces it later is honoured.
+  const now = (): number => (clock.now ? clock.now() : Date.now());
+
   // aidoku-rs's panic handler prints the panic message via std.print
   // immediately before calling std.abort, so remember it for the abort error.
   let lastPrint: string | null = null;
@@ -121,13 +126,13 @@ export function createStdImports(store: GlobalStore) {
 
     // Get current date as Unix timestamp
     current_date: (): number => {
-      return Date.now() / 1000;
+      return now() / 1000;
     },
 
     // Get UTC offset in seconds
     utc_offset: (): bigint => {
       // Return the offset in seconds (negative because getTimezoneOffset returns minutes west of UTC)
-      return BigInt(-new Date().getTimezoneOffset() * 60);
+      return BigInt(-new Date(now()).getTimezoneOffset() * 60);
     },
 
     // Parse a date string into a Unix timestamp (f64 seconds since epoch)
@@ -158,7 +163,7 @@ export function createStdImports(store: GlobalStore) {
         tz = null; // null = local timezone
       }
 
-      const date = parseDateWithFormat(dateStr, format, tz);
+      const date = parseDateWithFormat(dateStr, format, tz, now());
       if (date) {
         return Math.floor(date.getTime() / 1000);
       }
@@ -256,7 +261,7 @@ export function createStdImports(store: GlobalStore) {
     },
 
     create_date: (timestamp: number): number => {
-      const date = timestamp < 0 ? new Date() : new Date(timestamp * 1000);
+      const date = timestamp < 0 ? new Date(now()) : new Date(timestamp * 1000);
       return store.storeStdValue(date);
     },
 
@@ -412,7 +417,7 @@ export function createStdImports(store: GlobalStore) {
 
       const tz = timezoneLen > 0 ? store.readString(timezonePtr, timezoneLen) : null;
 
-      const date = parseDateWithFormat(value, format, tz);
+      const date = parseDateWithFormat(value, format, tz, now());
       if (date) {
         return Math.floor(date.getTime() / 1000);
       }
@@ -618,9 +623,9 @@ const RELATIVE_PATTERNS = [
   { pattern: /(\d+)\s*년\s*전/i, unit: "year" as const },
 ];
 
-// Parse relative dates
-function parseRelativeDate(str: string): Date | null {
-  const now = new Date();
+// Parse relative dates against `nowMs` (epoch milliseconds)
+function parseRelativeDate(str: string, nowMs: number = Date.now()): Date | null {
+  const now = new Date(nowMs);
 
   for (const { pattern, unit } of RELATIVE_PATTERNS) {
     const match = str.match(pattern);
@@ -672,13 +677,18 @@ function parseRelativeDate(str: string): Date | null {
 }
 
 // Date parsing helper - handles common Swift DateFormatter formats
-function parseDateWithFormat(str: string, format: string, tz: string | null): Date | null {
+function parseDateWithFormat(
+  str: string,
+  format: string,
+  tz: string | null,
+  nowMs: number = Date.now()
+): Date | null {
   try {
     // Trim the string
     str = str.trim();
 
     // Try relative date parsing first
-    const relativeDate = parseRelativeDate(str);
+    const relativeDate = parseRelativeDate(str, nowMs);
     if (relativeDate) {
       return relativeDate;
     }

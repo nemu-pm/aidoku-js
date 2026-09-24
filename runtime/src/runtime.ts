@@ -19,6 +19,7 @@ import type {
   HomeLayout,
   HomeComponent,
   HttpBridge,
+  RuntimeClock,
 } from "./types";
 import { FilterType } from "./types";
 import {
@@ -169,6 +170,8 @@ export interface AidokuRuntimeOptions {
   settingsSetter?: SettingsSetter;
   /** Canvas module for image operations (auto-detected, but can be overridden) */
   canvasModule?: CanvasModule;
+  /** Clock the source observes for dates and sleeps (defaults to real time) */
+  clock?: RuntimeClock;
 }
 
 /**
@@ -254,8 +257,8 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
 
   // Create import object with all namespaces
   const importObject: WebAssembly.Imports = {
-    env: createEnvImports(store),
-    std: createStdImports(store),
+    env: createEnvImports(store, options.clock),
+    std: createStdImports(store, options.clock),
     net: createNetImports(store, httpBridge),
     html: createHtmlImports(store),
     json: createJsonImports(store),

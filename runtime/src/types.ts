@@ -39,6 +39,28 @@ export interface HttpBridge {
   request(req: HttpRequest): HttpResponse;
 }
 
+/**
+ * Host clock for the time a source observes.
+ *
+ * Both members are SYNCHRONOUS, like HttpBridge, since WASM calls block. A host
+ * that replays or records source calls can pin time here so dates the source
+ * computes are reproducible.
+ */
+export interface RuntimeClock {
+  /**
+   * Current time in epoch milliseconds, used for std.current_date,
+   * std.utc_offset, std.create_date(-1) and relative date parsing.
+   * Defaults to reading `Date.now()` on every call.
+   */
+  now?: () => number;
+  /**
+   * Block for `seconds` (env.sleep). Defaults to busy-waiting on the real
+   * `Date.now()`, which is independent of `now` so a pinned clock cannot
+   * stall a sleeping source.
+   */
+  sleep?: (seconds: number) => void;
+}
+
 // ============================================================================
 // Core Manga Types
 // ============================================================================
