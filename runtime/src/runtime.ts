@@ -10,6 +10,7 @@ import type {
   MangaPageResult,
   Filter,
   FilterValue,
+  SelectFilter,
   SourceManifest,
   MangaStatus,
   ContentRating,
@@ -672,6 +673,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
     },
 
     getSearchMangaList(
+      this: AidokuSource,
       query: string | null,
       page: number,
       filters: FilterValue[]
@@ -693,6 +695,9 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
             genre: 9,
           };
 
+          // Legacy sources read a select value as an option index.
+          const legacyFilterDefinitions = this.getFilters();
+
           const convertToSwiftFilter = (f: FilterValue): unknown => {
             switch (f.type) {
               case FilterType.Title:
@@ -700,7 +705,11 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
               case FilterType.Author:
                 return { type: SwiftFilterType.author, name: f.name || "Author", value: f.value };
               case FilterType.Select:
-                return { type: SwiftFilterType.select, name: f.name, value: f.value };
+                return {
+                  type: SwiftFilterType.select,
+                  name: f.name,
+                  value: resolveLegacySelectIndex(f, legacyFilterDefinitions),
+                };
               case FilterType.Sort:
                 return { type: SwiftFilterType.sort, name: f.name, value: f.value };
               case FilterType.Check:
@@ -1354,6 +1363,44 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
     },
   };
   };
+}
+
+/**
+ * The option index a legacy (Swift-era) source expects for a select filter.
+ *
+ * Legacy sources read a select filter's value as the selected option's index,
+ * while hosts may send the option's id or label. An integer is used as-is; a
+ * string is looked up in the matching select definition's `ids`, then its
+ * `options` (the definition is found by name, searching into groups), then
+ * parsed as an integer. Anything else selects the first option.
+ */
+export function resolveLegacySelectIndex(filter: FilterValue, definitions: Filter[]): number {
+  const definition = findSelectFilter(definitions, filter.name);
+  const options = Array.isArray(definition?.options) ? definition.options : [];
+  const ids = Array.isArray(definition?.ids) ? definition.ids : [];
+  const value = filter.value;
+
+  if (typeof value === "number" && Number.isInteger(value)) return value;
+  if (typeof value === "string") {
+    const idIndex = ids.indexOf(value);
+    if (idIndex >= 0) return idIndex;
+    const optionIndex = options.indexOf(value);
+    if (optionIndex >= 0) return optionIndex;
+    const numericIndex = Number(value);
+    if (Number.isInteger(numericIndex)) return numericIndex;
+  }
+  return 0;
+}
+
+function findSelectFilter(filters: Filter[], name: string): SelectFilter | undefined {
+  for (const filter of filters) {
+    if (filter.type === FilterType.Select && filter.name === name) return filter;
+    if (filter.type === FilterType.Group && Array.isArray(filter.filters)) {
+      const nested = findSelectFilter(filter.filters, name);
+      if (nested) return nested;
+    }
+  }
+  return undefined;
 }
 
 // Helper to encode Listing for aidoku-rs
