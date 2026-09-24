@@ -452,7 +452,8 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
       }
 
       return getHostImageData(store, resultRid);
-    } catch {
+    } catch (e) {
+      if (e instanceof CloudflareBlockedError) throw e;
       return null;
     } finally {
       scope.cleanup();
@@ -622,6 +623,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
         try {
           start();
         } catch (e) {
+          if (e instanceof CloudflareBlockedError) throw e;
           console.error("[Aidoku] Initialize error:", e);
         }
       }
@@ -1089,6 +1091,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
         const decodedFilters = decodeFilterList(resultBytes);
         return decodedFilters.map(convertDecodedFilter);
       } catch (e) {
+        if (e instanceof CloudflareBlockedError) throw e;
         console.error("[Aidoku] getFilterList error:", e);
         return [];
       }
@@ -1131,6 +1134,10 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
             return result;
           }
         } catch (e) {
+          if (e instanceof CloudflareBlockedError) {
+            store.removeRequest(requestId);
+            throw e;
+          }
           console.error("[Aidoku] OLD ABI modifyImageRequest error:", e);
         }
 
@@ -1189,6 +1196,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
 
         return { url, headers: defaultHeaders };
       } catch (e) {
+        if (e instanceof CloudflareBlockedError) throw e;
         console.error("[Aidoku] modifyImageRequest error:", e);
         return { url, headers: defaultHeaders };
       } finally {
@@ -1335,6 +1343,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
         const [listings] = decodeVec(resultBytes, 0, decodeListingForVec);
         return listings;
       } catch (e) {
+        if (e instanceof CloudflareBlockedError) throw e;
         console.error("[Aidoku] getListings error:", e);
         return [];
       }
