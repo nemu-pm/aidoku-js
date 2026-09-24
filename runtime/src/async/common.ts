@@ -229,6 +229,18 @@ export function createAsyncWrapper(
       return source.handlesWebLogin;
     },
 
+    async handleBasicLogin(key, username, password) {
+      return cfRetry(() => source.handleBasicLogin(key, username, password));
+    },
+
+    async handleWebLogin(key, cookies) {
+      return cfRetry(() => source.handleWebLogin(key, cookies));
+    },
+
+    async handleNotification(notification) {
+      return cfRetry(() => source.handleNotification(notification));
+    },
+
     async getHome() {
       return cfRetry(() => source.getHome());
     },

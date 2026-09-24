@@ -70,6 +70,10 @@ export async function loadSource(
   const source = await loadSourceSync(input, sourceKey, {
     httpBridge,
     settingsGetter: (key: string) => currentSettings[key],
+    settingsSetter: (key: string, value: unknown) => {
+      currentSettings = { ...currentSettings, [key]: value };
+      settings?.set?.(key, value);
+    },
   });
 
   // Extract defaults from settings.json (like iOS Aidoku does)

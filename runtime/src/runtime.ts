@@ -47,6 +47,7 @@ export interface CanvasModule {
 }
 import {
   encodeString,
+  encodeVecString,
   encodeEmptyVec,
   encodeManga,
   encodeChapter,
@@ -59,6 +60,7 @@ import {
   decodeFilterList,
   decodeString,
   decodeVec,
+  decodeBool,
   concatBytes,
   decodeHomeLayout,
   decodeHomeComponent,
@@ -72,6 +74,7 @@ import {
   AidokuResultError,
   RuntimeMode,
   detectRuntimeMode,
+  getResultErrorMessage,
 } from "./result-decoder";
 
 export interface AidokuSource {
@@ -98,6 +101,23 @@ export interface AidokuSource {
   /** Whether this source handles cookie-based web login */
   handlesWebLogin: boolean;
   initialize(): void;
+  /**
+   * Submit credentials for a basic (username/password) login flow.
+   * Returns `true` if the source accepted the credentials, and `false` when
+   * the source does not export `handle_basic_login`.
+   */
+  handleBasicLogin(key: string, username: string, password: string): boolean;
+  /**
+   * Submit captured cookies for a web login flow.
+   * Returns `true` if the source accepted the session, and `false` when the
+   * source does not export `handle_web_login`.
+   */
+  handleWebLogin(key: string, cookies: Record<string, string>): boolean;
+  /**
+   * Deliver a notification (for example an OAuth callback URL) to the source.
+   * A no-op when the source does not export `handle_notification`.
+   */
+  handleNotification(notification: string): void;
   getSearchMangaList(query: string | null, page: number, filters: FilterValue[]): MangaPageResult;
   getMangaDetails(manga: Manga): Manga;
   getChapterList(manga: Manga): Chapter[];
@@ -308,12 +328,15 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
     | ((listingDescriptor: number, page: number) => number)
     | undefined;
 
-  // Login handlers (static detection for registry metadata)
-  const handleBasicLogin = exports.handle_basic_login as
+  // Login and notification handlers
+  const handleBasicLoginExport = exports.handle_basic_login as
     | ((keyDesc: number, usernameDesc: number, passwordDesc: number) => number)
     | undefined;
-  const handleWebLogin = exports.handle_web_login as
+  const handleWebLoginExport = exports.handle_web_login as
     | ((keyDesc: number, cookieKeysDesc: number, cookieValsDesc: number) => number)
+    | undefined;
+  const handleNotificationExport = exports.handle_notification as
+    | ((notificationDesc: number) => number)
     | undefined;
 
   // get_page_list with different signatures
@@ -335,6 +358,27 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
       return data.slice();
     } catch {
       return null;
+    }
+  }
+
+  function readBooleanResult(resultPtr: number, action: string): boolean {
+    if (resultPtr < 0) {
+      throw new Error(getResultErrorMessage(memory, resultPtr) ?? `${action} failed: ${resultPtr}`);
+    }
+    const payload = readResultPayload(memory, resultPtr);
+    if (freeResult && resultPtr > 0) {
+      freeResult(resultPtr);
+    }
+    if (!payload) {
+      return false;
+    }
+    const [result] = decodeBool(payload, 0);
+    return result;
+  }
+
+  function assertSuccess(resultCode: number, action: string): void {
+    if (resultCode < 0) {
+      throw new Error(getResultErrorMessage(memory, resultCode) ?? `${action} failed: ${resultCode}`);
     }
   }
 
@@ -550,8 +594,8 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
     hasHome: !!getHome,
     hasListingProvider: detectListingProvider(exports, mode),
     hasDynamicListings: !!getListings,
-    handlesBasicLogin: !!handleBasicLogin,
-    handlesWebLogin: !!handleWebLogin,
+    handlesBasicLogin: !!handleBasicLoginExport,
+    handlesWebLogin: !!handleWebLoginExport,
 
     initialize() {
       if (start) {
@@ -560,6 +604,48 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
         } catch (e) {
           console.error("[Aidoku] Initialize error:", e);
         }
+      }
+    },
+
+    handleBasicLogin(key: string, username: string, password: string): boolean {
+      if (!handleBasicLoginExport) return false;
+      const scope = store.createScope();
+      try {
+        const keyDescriptor = scope.storeValue(encodeString(key));
+        const usernameDescriptor = scope.storeValue(encodeString(username));
+        const passwordDescriptor = scope.storeValue(encodeString(password));
+        const resultPtr = handleBasicLoginExport(keyDescriptor, usernameDescriptor, passwordDescriptor);
+        return readBooleanResult(resultPtr, "handle_basic_login");
+      } finally {
+        scope.cleanup();
+      }
+    },
+
+    handleWebLogin(key: string, cookies: Record<string, string>): boolean {
+      if (!handleWebLoginExport) return false;
+      const scope = store.createScope();
+      try {
+        const keys = Object.keys(cookies);
+        const values = keys.map((cookieKey) => cookies[cookieKey] ?? "");
+        const keyDescriptor = scope.storeValue(encodeString(key));
+        const keysDescriptor = scope.storeValue(encodeVecString(keys));
+        const valuesDescriptor = scope.storeValue(encodeVecString(values));
+        const resultPtr = handleWebLoginExport(keyDescriptor, keysDescriptor, valuesDescriptor);
+        return readBooleanResult(resultPtr, "handle_web_login");
+      } finally {
+        scope.cleanup();
+      }
+    },
+
+    handleNotification(notification: string): void {
+      if (!handleNotificationExport) return;
+      const scope = store.createScope();
+      try {
+        const notificationDescriptor = scope.storeValue(encodeString(notification));
+        const resultCode = handleNotificationExport(notificationDescriptor);
+        assertSuccess(resultCode, "handle_notification");
+      } finally {
+        scope.cleanup();
       }
     },
 
