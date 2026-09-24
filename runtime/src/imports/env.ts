@@ -2,8 +2,9 @@
  * env namespace - environment functions (print, abort, sleep, etc.)
  */
 import type { GlobalStore } from "../global-store";
+import type { RuntimeClock } from "../types";
 
-export function createEnvImports(store: GlobalStore) {
+export function createEnvImports(store: GlobalStore, clock: RuntimeClock = {}) {
   // Helper to read AssemblyScript string length from ptr-4
   // AssemblyScript stores string length at offset -4 from the data pointer
   // Swift reads 1 byte for legacy compat, but proper AS uses 4-byte LE i32
@@ -50,6 +51,10 @@ export function createEnvImports(store: GlobalStore) {
     },
 
     sleep: (seconds: number): void => {
+      if (clock.sleep) {
+        clock.sleep(seconds);
+        return;
+      }
       // Blocking sleep using sync busy-wait
       // This is a hack but necessary for WASM sync calls
       const start = Date.now();

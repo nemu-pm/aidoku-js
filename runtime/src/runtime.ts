@@ -9,7 +9,9 @@ import type {
   Page,
   MangaPageResult,
   Filter,
+  FilterInfo,
   FilterValue,
+  SelectFilter,
   SourceManifest,
   MangaStatus,
   ContentRating,
@@ -19,6 +21,7 @@ import type {
   HomeLayout,
   HomeComponent,
   HttpBridge,
+  RuntimeClock,
 } from "./types";
 import { FilterType } from "./types";
 import {
@@ -47,6 +50,7 @@ export interface CanvasModule {
 }
 import {
   encodeString,
+  encodeVecString,
   encodeEmptyVec,
   encodeManga,
   encodeChapter,
@@ -59,6 +63,7 @@ import {
   decodeFilterList,
   decodeString,
   decodeVec,
+  decodeBool,
   concatBytes,
   decodeHomeLayout,
   decodeHomeComponent,
@@ -72,6 +77,7 @@ import {
   AidokuResultError,
   RuntimeMode,
   detectRuntimeMode,
+  createResultError,
 } from "./result-decoder";
 
 export interface AidokuSource {
@@ -98,6 +104,26 @@ export interface AidokuSource {
   /** Whether this source handles cookie-based web login */
   handlesWebLogin: boolean;
   initialize(): void;
+  /**
+   * Submit credentials for a basic (username/password) login flow.
+   * Returns `true` if the source accepted the credentials, and `false` when
+   * the source does not export `handle_basic_login`. Throws an
+   * AidokuResultError carrying the source's message when the login fails.
+   */
+  handleBasicLogin(key: string, username: string, password: string): boolean;
+  /**
+   * Submit captured cookies for a web login flow.
+   * Returns `true` if the source accepted the session, and `false` when the
+   * source does not export `handle_web_login`. Throws an AidokuResultError
+   * carrying the source's message when the login fails.
+   */
+  handleWebLogin(key: string, cookies: Record<string, string>): boolean;
+  /**
+   * Deliver a notification (for example an OAuth callback URL) to the source.
+   * A no-op when the source does not export `handle_notification`. Throws an
+   * AidokuResultError when the source cannot read the notification.
+   */
+  handleNotification(notification: string): void;
   getSearchMangaList(query: string | null, page: number, filters: FilterValue[]): MangaPageResult;
   getMangaDetails(manga: Manga): Manga;
   getChapterList(manga: Manga): Chapter[];
@@ -138,6 +164,11 @@ export interface AidokuSource {
     responseCode: number,
     responseHeaders: Record<string, string>
   ): Promise<Uint8Array | null>;
+  /**
+   * Release the source's host-side state: descriptors, requests and the
+   * store's cleanup timer. The source must not be called afterwards.
+   */
+  dispose(): void;
 }
 
 export interface AidokuRuntimeOptions {
@@ -149,6 +180,18 @@ export interface AidokuRuntimeOptions {
   settingsSetter?: SettingsSetter;
   /** Canvas module for image operations (auto-detected, but can be overridden) */
   canvasModule?: CanvasModule;
+  /** Clock the source observes for dates and sleeps (defaults to real time) */
+  clock?: RuntimeClock;
+  /**
+   * The source's WASM, already compiled.
+   *
+   * A compiled module is immutable, so a host that loads the same source many
+   * times (for example a fresh instance per replayed call) can compile once
+   * and pass the module here; each load still gets fresh memory and state. It
+   * must be compiled from the same bytes as `input`. With a module the
+   * instance is created synchronously (`new WebAssembly.Instance`).
+   */
+  compiledModule?: WebAssembly.Module;
 }
 
 /**
@@ -197,7 +240,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
     sourceKey: string,
     options: AidokuRuntimeOptions
   ): Promise<AidokuSource> {
-    const { httpBridge, settingsGetter = () => undefined, settingsSetter, canvasModule = defaultCanvasModule } = options;
+    const { httpBridge, settingsGetter = () => undefined, settingsSetter, canvasModule = defaultCanvasModule, compiledModule } = options;
     const { createCanvasImports, createHostImage, getHostImageData } = canvasModule;
     const store = new GlobalStore(sourceKey);
 
@@ -234,8 +277,8 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
 
   // Create import object with all namespaces
   const importObject: WebAssembly.Imports = {
-    env: createEnvImports(store),
-    std: createStdImports(store),
+    env: createEnvImports(store, options.clock),
+    std: createStdImports(store, options.clock),
     net: createNetImports(store, httpBridge),
     html: createHtmlImports(store),
     json: createJsonImports(store),
@@ -246,8 +289,10 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
   };
 
   // Compile and instantiate WASM module
-  const module = await WebAssembly.compile(wasmBytes);
-  const instance = await WebAssembly.instantiate(module, importObject);
+  const module = compiledModule ?? await WebAssembly.compile(wasmBytes);
+  const instance = compiledModule
+    ? new WebAssembly.Instance(module, importObject)
+    : await WebAssembly.instantiate(module, importObject);
 
   // Get memory and set it in the store
   const memory = instance.exports.memory as WebAssembly.Memory;
@@ -308,12 +353,15 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
     | ((listingDescriptor: number, page: number) => number)
     | undefined;
 
-  // Login handlers (static detection for registry metadata)
-  const handleBasicLogin = exports.handle_basic_login as
+  // Login and notification handlers
+  const handleBasicLoginExport = exports.handle_basic_login as
     | ((keyDesc: number, usernameDesc: number, passwordDesc: number) => number)
     | undefined;
-  const handleWebLogin = exports.handle_web_login as
+  const handleWebLoginExport = exports.handle_web_login as
     | ((keyDesc: number, cookieKeysDesc: number, cookieValsDesc: number) => number)
+    | undefined;
+  const handleNotificationExport = exports.handle_notification as
+    | ((notificationDesc: number) => number)
     | undefined;
 
   // get_page_list with different signatures
@@ -335,6 +383,26 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
       return data.slice();
     } catch {
       return null;
+    }
+  }
+
+  // Login exports return a Result<bool>: a payload, a negative code, or a
+  // pointer to a Message buffer carrying the source's own error text.
+  function readBooleanResult(resultPtr: number): boolean {
+    const payload = readResultOrThrow(memory, resultPtr, freeResult);
+    if (freeResult && resultPtr > 0) {
+      freeResult(resultPtr);
+    }
+    if (!payload) {
+      return false;
+    }
+    const [result] = decodeBool(payload, 0);
+    return result;
+  }
+
+  function assertSuccess(resultCode: number): void {
+    if (resultCode < 0) {
+      throw createResultError(memory, resultCode);
     }
   }
 
@@ -388,7 +456,8 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
       }
 
       return getHostImageData(store, resultRid);
-    } catch {
+    } catch (e) {
+      if (e instanceof CloudflareBlockedError) throw e;
       return null;
     } finally {
       scope.cleanup();
@@ -444,6 +513,29 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
         };
       default:
         return { type: FilterType.Title, name: decoded.name };
+    }
+  }
+
+  // Filters the source reports through get_filters
+  function getFiltersImpl(): Filter[] {
+    if (!getFilterList) return [];
+
+    try {
+      const resultPtr = getFilterList();
+      const resultBytes = readResult(resultPtr);
+
+      if (freeResult && resultPtr > 0) {
+        freeResult(resultPtr);
+      }
+
+      if (!resultBytes) return [];
+
+      const decodedFilters = decodeFilterList(resultBytes);
+      return decodedFilters.map(convertDecodedFilter);
+    } catch (e) {
+      if (e instanceof CloudflareBlockedError) throw e;
+      console.error("[Aidoku] getFilterList error:", e);
+      return [];
     }
   }
 
@@ -550,16 +642,59 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
     hasHome: !!getHome,
     hasListingProvider: detectListingProvider(exports, mode),
     hasDynamicListings: !!getListings,
-    handlesBasicLogin: !!handleBasicLogin,
-    handlesWebLogin: !!handleWebLogin,
+    handlesBasicLogin: !!handleBasicLoginExport,
+    handlesWebLogin: !!handleWebLoginExport,
 
     initialize() {
       if (start) {
         try {
           start();
         } catch (e) {
+          if (e instanceof CloudflareBlockedError) throw e;
           console.error("[Aidoku] Initialize error:", e);
         }
+      }
+    },
+
+    handleBasicLogin(key: string, username: string, password: string): boolean {
+      if (!handleBasicLoginExport) return false;
+      const scope = store.createScope();
+      try {
+        const keyDescriptor = scope.storeValue(encodeString(key));
+        const usernameDescriptor = scope.storeValue(encodeString(username));
+        const passwordDescriptor = scope.storeValue(encodeString(password));
+        const resultPtr = handleBasicLoginExport(keyDescriptor, usernameDescriptor, passwordDescriptor);
+        return readBooleanResult(resultPtr);
+      } finally {
+        scope.cleanup();
+      }
+    },
+
+    handleWebLogin(key: string, cookies: Record<string, string>): boolean {
+      if (!handleWebLoginExport) return false;
+      const scope = store.createScope();
+      try {
+        const keys = Object.keys(cookies);
+        const values = keys.map((cookieKey) => cookies[cookieKey] ?? "");
+        const keyDescriptor = scope.storeValue(encodeString(key));
+        const keysDescriptor = scope.storeValue(encodeVecString(keys));
+        const valuesDescriptor = scope.storeValue(encodeVecString(values));
+        const resultPtr = handleWebLoginExport(keyDescriptor, keysDescriptor, valuesDescriptor);
+        return readBooleanResult(resultPtr);
+      } finally {
+        scope.cleanup();
+      }
+    },
+
+    handleNotification(notification: string): void {
+      if (!handleNotificationExport) return;
+      const scope = store.createScope();
+      try {
+        const notificationDescriptor = scope.storeValue(encodeString(notification));
+        const resultCode = handleNotificationExport(notificationDescriptor);
+        assertSuccess(resultCode);
+      } finally {
+        scope.cleanup();
       }
     },
 
@@ -585,6 +720,14 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
             genre: 9,
           };
 
+          // Legacy sources read a select value as an option index. Their
+          // filters are declared in filters.json (the manifest); get_filters
+          // is only asked when a select is not declared there.
+          let runtimeFilters: Filter[] | null = null;
+          const selectDefinition = (name: string): LegacySelectDefinition | undefined =>
+            findManifestSelect(manifest.filters, name) ??
+            findSelectFilter((runtimeFilters ??= getFiltersImpl()), name);
+
           const convertToSwiftFilter = (f: FilterValue): unknown => {
             switch (f.type) {
               case FilterType.Title:
@@ -592,7 +735,11 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
               case FilterType.Author:
                 return { type: SwiftFilterType.author, name: f.name || "Author", value: f.value };
               case FilterType.Select:
-                return { type: SwiftFilterType.select, name: f.name, value: f.value };
+                return {
+                  type: SwiftFilterType.select,
+                  name: f.name,
+                  value: resolveLegacySelectIndex(f, selectDefinition(f.name)),
+                };
               case FilterType.Sort:
                 return { type: SwiftFilterType.sort, name: f.name, value: f.value };
               case FilterType.Check:
@@ -968,24 +1115,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
     },
 
     getFilters(): Filter[] {
-      if (!getFilterList) return [];
-
-      try {
-        const resultPtr = getFilterList();
-        const resultBytes = readResult(resultPtr);
-
-        if (freeResult && resultPtr > 0) {
-          freeResult(resultPtr);
-        }
-
-        if (!resultBytes) return [];
-
-        const decodedFilters = decodeFilterList(resultBytes);
-        return decodedFilters.map(convertDecodedFilter);
-      } catch (e) {
-        console.error("[Aidoku] getFilterList error:", e);
-        return [];
-      }
+      return getFiltersImpl();
     },
 
     modifyImageRequest(
@@ -1025,6 +1155,10 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
             return result;
           }
         } catch (e) {
+          if (e instanceof CloudflareBlockedError) {
+            store.removeRequest(requestId);
+            throw e;
+          }
           console.error("[Aidoku] OLD ABI modifyImageRequest error:", e);
         }
 
@@ -1083,6 +1217,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
 
         return { url, headers: defaultHeaders };
       } catch (e) {
+        if (e instanceof CloudflareBlockedError) throw e;
         console.error("[Aidoku] modifyImageRequest error:", e);
         return { url, headers: defaultHeaders };
       } finally {
@@ -1229,12 +1364,89 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
         const [listings] = decodeVec(resultBytes, 0, decodeListingForVec);
         return listings;
       } catch (e) {
+        if (e instanceof CloudflareBlockedError) throw e;
         console.error("[Aidoku] getListings error:", e);
         return [];
       }
     },
+
+    dispose() {
+      store.destroy();
+    },
   };
   };
+}
+
+/** The options of a select filter, from filters.json or get_filters. */
+export interface LegacySelectDefinition {
+  options?: unknown;
+  ids?: unknown;
+}
+
+/**
+ * The option index a legacy (Swift-era) source expects for a select filter.
+ *
+ * Legacy sources read a select filter's value as the selected option's index,
+ * while hosts may send the option's id or label. An integer is used as-is; a
+ * string is looked up in the definition's `ids`, then its `options`, then
+ * parsed as an integer. Anything else selects the first option.
+ */
+export function resolveLegacySelectIndex(
+  filter: FilterValue,
+  definition: LegacySelectDefinition | undefined
+): number {
+  const options = Array.isArray(definition?.options) ? definition.options : [];
+  const ids = Array.isArray(definition?.ids) ? definition.ids : [];
+  const value = filter.value;
+
+  if (typeof value === "number" && Number.isInteger(value)) return value;
+  if (typeof value === "string") {
+    const idIndex = ids.indexOf(value);
+    if (idIndex >= 0) return idIndex;
+    const optionIndex = options.indexOf(value);
+    if (optionIndex >= 0) return optionIndex;
+    const numericIndex = Number(value);
+    if (Number.isInteger(numericIndex)) return numericIndex;
+  }
+  return 0;
+}
+
+/**
+ * Find a select filter declared in filters.json, searching into groups.
+ *
+ * The name a host sends is the filter's display name, which filters.json
+ * spells `title` (aidoku-rs) or `name` (Swift-era); `id` is matched too. Both
+ * the string types of filters.json and numeric FilterType values are accepted.
+ */
+export function findManifestSelect(
+  filters: FilterInfo[] | undefined,
+  name: string
+): FilterInfo | undefined {
+  if (!Array.isArray(filters)) return undefined;
+  for (const filter of filters) {
+    if (!filter || typeof filter !== "object") continue;
+    const type = filter.type as unknown;
+    if (type === "select" || type === FilterType.Select) {
+      if (filter.title === name || filter.name === name || (filter.id != null && String(filter.id) === name)) {
+        return filter;
+      }
+    } else if (type === "group" || type === FilterType.Group) {
+      const nested = findManifestSelect(filter.filters, name);
+      if (nested) return nested;
+    }
+  }
+  return undefined;
+}
+
+function findSelectFilter(filters: Filter[], name: string): SelectFilter | undefined {
+  for (const filter of filters) {
+    if (filter.type === FilterType.Select && filter.name === name) return filter;
+    if (filter.type === FilterType.Group && Array.isArray(filter.filters)) {
+      const nested = findSelectFilter(filter.filters, name);
+      if (nested) return nested;
+    }
+  }
+  return undefined;
 }
 
 // Helper to encode Listing for aidoku-rs

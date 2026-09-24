@@ -28,6 +28,9 @@ function createSource(
     handlesBasicLogin: false,
     handlesWebLogin: false,
     initialize() {},
+    handleBasicLogin: () => false,
+    handleWebLogin: () => false,
+    handleNotification() {},
     getSearchMangaList: () => ({ entries: [], hasNextPage: false }),
     getMangaDetails: (manga) => manga,
     getChapterList: () => [],
@@ -40,6 +43,7 @@ function createSource(
     modifyImageRequest,
     processPageImage: async () => null,
     processCoverImage: async (imageData) => imageData,
+    dispose() {},
   };
 }
 
@@ -75,6 +79,48 @@ describe("createAsyncWrapper cover image processing", () => {
         {}
       )
     ).toEqual(new Uint8Array([1, 2, 3]));
+  });
+});
+
+describe("createAsyncWrapper auth handlers", () => {
+  const noopImageRequest: AidokuSource["modifyImageRequest"] = (url) => ({ url, headers: {} });
+
+  it("forwards login and notification calls to the source", async () => {
+    const calls: unknown[][] = [];
+    const source: AidokuSource = {
+      ...createSource(noopImageRequest),
+      handleBasicLogin: (...args) => (calls.push(["basic", ...args]), true),
+      handleWebLogin: (...args) => (calls.push(["web", ...args]), false),
+      handleNotification: (...args) => void calls.push(["notification", ...args]),
+    };
+    const wrapper = createAsyncWrapper(source, async (fn) => fn());
+
+    expect(await wrapper.handleBasicLogin("login", "alice", "pw")).toBe(true);
+    expect(await wrapper.handleWebLogin("login", { session: "abc" })).toBe(false);
+    expect(await wrapper.handleNotification("nemu://oauth")).toBeUndefined();
+    expect(calls).toEqual([
+      ["basic", "login", "alice", "pw"],
+      ["web", "login", { session: "abc" }],
+      ["notification", "nemu://oauth"],
+    ]);
+  });
+
+  it("retries a login blocked by a Cloudflare challenge once it is solved", async () => {
+    let attempts = 0;
+    const source: AidokuSource = {
+      ...createSource(noopImageRequest),
+      handleBasicLogin: () => {
+        attempts++;
+        if (attempts === 1) {
+          throw new CloudflareBlockedError("https://example.com/login", 403);
+        }
+        return true;
+      },
+    };
+    const wrapper = createAsyncWrapper(source, createCfRetry(undefined, async () => true));
+
+    expect(await wrapper.handleBasicLogin("login", "alice", "pw")).toBe(true);
+    expect(attempts).toBe(2);
   });
 });
 

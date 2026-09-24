@@ -13,33 +13,275 @@ import {
 } from "../cloudflare/detect";
 
 /**
- * Extract default values from settings.json structure
- * Matches iOS Aidoku behavior from Source.swift
+ * Limits for reading defaults out of a source's settings.json. The schema is
+ * source-controlled input, so extraction is bounded in depth, node count and
+ * total string size.
  */
-export function extractSettingsDefaults(
-  settingsJson: unknown[] | undefined
-): Record<string, unknown> {
-  const defaults: Record<string, unknown> = {};
-  if (!settingsJson) return defaults;
+const SETTING_DEFAULT_LIMITS = Object.freeze({
+  /** Nesting depth of group/page items */
+  depth: 32,
+  /** Schema nodes inspected in total */
+  nodes: 1024,
+  /** Items in a list default */
+  listItems: 256,
+  keyLength: 256,
+  /** Length of one string default (or list item) */
+  stringLength: 4096,
+  /** Characters across all keys and string defaults */
+  schemaStringChars: 1048576,
+  /** Largest absolute numeric default */
+  absoluteNumber: 1000000000000,
+});
 
-  for (const item of settingsJson) {
-    if (typeof item !== "object" || item === null) continue;
-    const settingItem = item as Record<string, unknown>;
-    
-    // Handle group items (nested settings)
-    if (settingItem.type === "group" && Array.isArray(settingItem.items)) {
-      for (const subItem of settingItem.items) {
-        if (typeof subItem !== "object" || subItem === null) continue;
-        const setting = subItem as Record<string, unknown>;
-        if (setting.key && setting.default !== undefined) {
-          defaults[setting.key as string] = setting.default;
-        }
+/** Setting types that carry a default value */
+const SETTING_DEFAULT_TYPES = new Set([
+  "select",
+  "picker",
+  "multi-select",
+  "multi-single-select",
+  "switch",
+  "slider",
+  "stepper",
+  "segment",
+  "text",
+  "editable-list",
+]);
+
+interface SanitizedDefault {
+  value: unknown;
+  /** String characters the value consumes from the schema budget */
+  stringChars: number;
+}
+
+/** An own data property, without running getters or proxy traps that throw. */
+function ownDataValue(value: object, key: string): unknown {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function asArray(value: unknown): unknown[] | null {
+  try {
+    return Array.isArray(value) ? value : null;
+  } catch {
+    // Array.isArray throws for a revoked proxy
+    return null;
+  }
+}
+
+function arrayLength(value: unknown[]): number {
+  const length = ownDataValue(value, "length");
+  return typeof length === "number" && Number.isSafeInteger(length) && length >= 0 ? length : 0;
+}
+
+function arrayValue(value: unknown[], index: number): unknown {
+  return ownDataValue(value, String(index));
+}
+
+function asPlainRecord(value: unknown): object | null {
+  if (!value || typeof value !== "object" || asArray(value)) return null;
+  try {
+    const prototype = Object.getPrototypeOf(value);
+    return prototype === Object.prototype || prototype === null ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Control, bidi and invisible formatting characters are not allowed in keys. */
+function isUnsafeKeyCodePoint(codePoint: number): boolean {
+  return codePoint < 0x20 ||
+    (codePoint >= 0x7f && codePoint <= 0x9f) ||
+    codePoint === 0xad ||
+    codePoint === 0x61c ||
+    codePoint === 0x200b ||
+    codePoint === 0x200e ||
+    codePoint === 0x200f ||
+    (codePoint >= 0x202a && codePoint <= 0x202e) ||
+    codePoint === 0x2060 ||
+    (codePoint >= 0x2066 && codePoint <= 0x2069) ||
+    codePoint === 0xfeff;
+}
+
+function safeSettingKey(value: unknown): string | null {
+  if (typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > SETTING_DEFAULT_LIMITS.keyLength ||
+    value.trim().length === 0) {
+    return null;
+  }
+  for (const character of value) {
+    if (isUnsafeKeyCodePoint(character.codePointAt(0) ?? 0)) return null;
+  }
+  return value;
+}
+
+function finiteSettingNumber(value: unknown): number | null {
+  return typeof value === "number" &&
+    Number.isFinite(value) &&
+    Math.abs(value) <= SETTING_DEFAULT_LIMITS.absoluteNumber
+    ? value
+    : null;
+}
+
+function sanitizeStringDefault(value: unknown, remainingStringChars: number): SanitizedDefault | null {
+  if (typeof value !== "string" ||
+    value.length > SETTING_DEFAULT_LIMITS.stringLength ||
+    value.length > remainingStringChars) {
+    return null;
+  }
+  return { value, stringChars: value.length };
+}
+
+function sanitizeStringArrayDefault(value: unknown, remainingStringChars: number): { value: string[]; stringChars: number } | null {
+  const input = asArray(value);
+  if (!input) return null;
+  const length = arrayLength(input);
+  if (length > SETTING_DEFAULT_LIMITS.listItems) return null;
+  const output: string[] = [];
+  let stringChars = 0;
+  for (let index = 0; index < length; index += 1) {
+    const item = arrayValue(input, index);
+    if (typeof item !== "string" ||
+      item.length > SETTING_DEFAULT_LIMITS.stringLength ||
+      stringChars + item.length > remainingStringChars) {
+      return null;
+    }
+    output.push(item);
+    stringChars += item.length;
+  }
+  return { value: output, stringChars };
+}
+
+function sanitizeSettingDefault(
+  type: string,
+  value: unknown,
+  record: object,
+  remainingStringChars: number
+): SanitizedDefault | null {
+  // A picker is a select presented as a wheel; both hold the chosen value.
+  if (type === "select" || type === "picker" || type === "text") {
+    return sanitizeStringDefault(value, remainingStringChars);
+  }
+  if (type === "multi-select" ||
+    type === "multi-single-select" ||
+    type === "editable-list") {
+    const result = sanitizeStringArrayDefault(value, remainingStringChars);
+    // A single-choice list keeps only its first entry.
+    if (type !== "multi-single-select" || !result || result.value.length <= 1) return result;
+    return {
+      value: result.value.slice(0, 1),
+      stringChars: result.value[0].length,
+    };
+  }
+  if (type === "switch") {
+    return typeof value === "boolean" ? { value, stringChars: 0 } : null;
+  }
+  if (type === "segment") {
+    return typeof value === "number" &&
+      Number.isInteger(value) &&
+      value >= 0 &&
+      value <= SETTING_DEFAULT_LIMITS.absoluteNumber
+      ? { value, stringChars: 0 }
+      : null;
+  }
+  if (type === "slider" || type === "stepper") {
+    const number = finiteSettingNumber(value);
+    if (number === null) return null;
+    const rawMinimum = finiteSettingNumber(ownDataValue(record, "min")) ??
+      finiteSettingNumber(ownDataValue(record, "minimumValue")) ??
+      0;
+    const rawMaximum = finiteSettingNumber(ownDataValue(record, "max")) ??
+      finiteSettingNumber(ownDataValue(record, "maximumValue")) ??
+      100;
+    const minimum = Math.min(rawMinimum, rawMaximum);
+    const maximum = Math.max(rawMinimum, rawMaximum);
+    return {
+      value: Math.min(maximum, Math.max(minimum, number)),
+      stringChars: 0,
+    };
+  }
+  return null;
+}
+
+/**
+ * Extract default values from settings.json, as iOS Aidoku does
+ * (Source.swift), before the source is initialized.
+ *
+ * settings.json is source-controlled, so only bounded, type-compatible
+ * defaults are kept: known setting types with a safe key, a value of the
+ * type's shape (clamped to a slider/stepper's range; a multi-single-select
+ * keeps its first entry), found within the depth, node and size limits.
+ * Getters and proxies are never invoked, the first occurrence of a key wins,
+ * and the result has no prototype so keys like `__proto__` stay plain data.
+ * Callers spread it into their own settings object.
+ */
+export function extractSettingsDefaults(settingsJson: unknown): Record<string, unknown> {
+  const defaults: Record<string, unknown> = Object.create(null);
+  const root = asArray(settingsJson);
+  if (!root) return defaults;
+
+  const seenRecords = new WeakSet<object>();
+  const seenArrays = new WeakSet<unknown[]>([root]);
+  const claimedKeys = new Set<string>();
+  const stack: { input: unknown[]; length: number; index: number; depth: number }[] = [{
+    input: root,
+    length: arrayLength(root),
+    index: 0,
+    depth: 0,
+  }];
+  let inspectedNodes = 0;
+  let remainingStringChars = SETTING_DEFAULT_LIMITS.schemaStringChars;
+
+  while (stack.length > 0 && inspectedNodes < SETTING_DEFAULT_LIMITS.nodes) {
+    const frame = stack[stack.length - 1];
+    if (frame.index >= frame.length) {
+      stack.pop();
+      continue;
+    }
+    const rawNode = arrayValue(frame.input, frame.index++);
+    inspectedNodes += 1;
+    const record = asPlainRecord(rawNode);
+    if (!record || seenRecords.has(record)) continue;
+    seenRecords.add(record);
+
+    const type = ownDataValue(record, "type");
+    if (type === "group" || type === "page") {
+      const children = asArray(ownDataValue(record, "items"));
+      if (children &&
+        frame.depth < SETTING_DEFAULT_LIMITS.depth &&
+        !seenArrays.has(children)) {
+        seenArrays.add(children);
+        stack.push({
+          input: children,
+          length: arrayLength(children),
+          index: 0,
+          depth: frame.depth + 1,
+        });
       }
+      continue;
     }
-    // Handle top-level items with key and default
-    else if (settingItem.key && settingItem.default !== undefined) {
-      defaults[settingItem.key as string] = settingItem.default;
-    }
+    if (typeof type !== "string" || !SETTING_DEFAULT_TYPES.has(type)) continue;
+
+    const key = safeSettingKey(ownDataValue(record, "key"));
+    if (!key || claimedKeys.has(key) || key.length > remainingStringChars) continue;
+    const defaultValue = ownDataValue(record, "default");
+    if (defaultValue === undefined) continue;
+    const sanitized = sanitizeSettingDefault(type, defaultValue, record, remainingStringChars - key.length);
+    if (!sanitized) continue;
+
+    Object.defineProperty(defaults, key, {
+      value: sanitized.value,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+    claimedKeys.add(key);
+    remainingStringChars -= key.length + sanitized.stringChars;
+    if (remainingStringChars <= 0) break;
   }
 
   return defaults;
@@ -227,6 +469,18 @@ export function createAsyncWrapper(
 
     async handlesWebLogin() {
       return source.handlesWebLogin;
+    },
+
+    async handleBasicLogin(key, username, password) {
+      return cfRetry(() => source.handleBasicLogin(key, username, password));
+    },
+
+    async handleWebLogin(key, cookies) {
+      return cfRetry(() => source.handleWebLogin(key, cookies));
+    },
+
+    async handleNotification(notification) {
+      return cfRetry(() => source.handleNotification(notification));
     },
 
     async getHome() {

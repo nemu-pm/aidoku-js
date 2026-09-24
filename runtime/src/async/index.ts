@@ -110,6 +110,14 @@ export async function loadSource(
   // Get initial settings
   const initialSettings = settings?.get() ?? {};
 
+  // Forward settings the source writes back to the host's store (for example
+  // an OAuth token captured in handle_notification).
+  const settingsSetter = settings?.set
+    ? Comlink.proxy((key: string, value: unknown) => {
+        settings.set?.(key, value);
+      })
+    : null;
+
   // Load source in worker
   // Pass sharedBuffer if using SAB mode
   const result = await workerSource.load(
@@ -117,7 +125,8 @@ export async function loadSource(
     sourceKey,
     useSabMode ? null : (proxyUrl ?? null), // Don't use proxyUrl in SAB mode
     initialSettings,
-    sharedBuffer // Will be null if not using SAB mode
+    sharedBuffer, // Will be null if not using SAB mode
+    settingsSetter
   );
 
   if (!result.success || !result.manifest) {
@@ -128,6 +137,17 @@ export async function loadSource(
   const manifest = result.manifest;
   const settingsJson = result.settingsJson;
 
+  // Retry network-bound calls after a Cloudflare challenge is cleared
+  const cfRetry = createCfRetry(agentUrl, cloudflareSolver);
+
+  // Initialize with defaults populated; start() may hit a challenge too
+  try {
+    await cfRetry(() => workerSource.initialize());
+  } catch (e) {
+    worker.terminate();
+    throw e;
+  }
+
   // Subscribe to settings changes if available
   let unsubscribe: (() => void) | undefined;
   if (settings?.subscribe) {
@@ -136,9 +156,6 @@ export async function loadSource(
       workerSource.updateSettings(newSettings);
     });
   }
-
-  // Retry network-bound calls after a Cloudflare challenge is cleared
-  const cfRetry = createCfRetry(agentUrl, cloudflareSolver);
 
   // Return async wrapper
   const source: AsyncAidokuSource = {
@@ -196,6 +213,18 @@ export async function loadSource(
 
     async handlesWebLogin() {
       return workerSource.handlesWebLogin();
+    },
+
+    async handleBasicLogin(key, username, password) {
+      return cfRetry(() => workerSource.handleBasicLogin(key, username, password));
+    },
+
+    async handleWebLogin(key, cookies) {
+      return cfRetry(() => workerSource.handleWebLogin(key, cookies));
+    },
+
+    async handleNotification(notification) {
+      return cfRetry(() => workerSource.handleNotification(notification));
     },
 
     async getHome() {

@@ -38,6 +38,23 @@ export function createDefaultsImports(
   settingsGetter: SettingsGetter,
   settingsSetter?: SettingsSetter
 ) {
+  // Read the framed payload the source passes for a value: an i32 total
+  // length, an 8-byte header, then `length - 8` payload bytes. Reading exactly
+  // the payload keeps decoders from running into uninitialised memory.
+  function readItemBytes(ptr: number): Uint8Array | null {
+    if (ptr <= 0) return null;
+    const memory = store.memory;
+    if (!memory) return null;
+    try {
+      const view = new DataView(memory.buffer);
+      const len = view.getInt32(ptr, true);
+      if (len <= 8) return null;
+      return new Uint8Array(memory.buffer, ptr + 8, len - 8).slice();
+    } catch {
+      return null;
+    }
+  }
+
   // Helper to encode a JS value to postcard bytes for storage
   function encodeValueForStorage(value: unknown): Uint8Array {
     if (value === null || value === undefined) {
@@ -58,27 +75,28 @@ export function createDefaultsImports(
     if (Array.isArray(value)) {
       return encodeVecString(value.map(String));
     }
+    // Data values (defaults_set_data) are stored as the postcard bytes the
+    // source encoded, and defaults_get deserializes the rid's bytes as-is, so
+    // they go back unchanged.
+    if (ArrayBuffer.isView(value)) {
+      return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
+    }
+    if (Object.prototype.toString.call(value) === "[object ArrayBuffer]") {
+      return new Uint8Array(value as ArrayBuffer).slice();
+    }
     // For objects/other types, try JSON as string
     return encodeString(JSON.stringify(value));
   }
 
   // Helper to decode postcard bytes from WASM memory based on kind
   function decodeValueFromWasm(kind: number, ptr: number): unknown {
-    if (ptr <= 0) return null;
+    if (kind === DefaultKind.Null) return null;
 
-    // Read the postcard-encoded value from WASM memory
-    const memory = store.memory;
-    if (!memory) return null;
-
-    // Read enough bytes for decoding (max reasonable size for settings)
-    const maxLen = 4096;
-    const bytes = store.readBytes(ptr, maxLen);
+    const bytes = readItemBytes(ptr);
     if (!bytes) return null;
 
     try {
       switch (kind) {
-        case DefaultKind.Null:
-          return null;
         case DefaultKind.Bool: {
           const [val] = decodeBool(bytes, 0);
           return val;
@@ -100,20 +118,10 @@ export function createDefaultsImports(
           const [val] = decodeVec(bytes, 0, decodeString);
           return val;
         }
-        case DefaultKind.Data: {
-          // Raw data - just store the bytes
-          // First decode the length to know how much to read
-          let len = 0;
-          let shift = 0;
-          let pos = 0;
-          while (pos < bytes.length) {
-            const byte = bytes[pos++];
-            len |= (byte & 0x7f) << shift;
-            if ((byte & 0x80) === 0) break;
-            shift += 7;
-          }
-          return bytes.slice(pos, pos + len);
-        }
+        case DefaultKind.Data:
+          // The framed payload already is the raw data; it carries no inner
+          // length prefix to decode.
+          return bytes;
         default:
           return null;
       }

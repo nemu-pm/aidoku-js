@@ -70,6 +70,10 @@ export async function loadSource(
   const source = await loadSourceSync(input, sourceKey, {
     httpBridge,
     settingsGetter: (key: string) => currentSettings[key],
+    settingsSetter: (key: string, value: unknown) => {
+      currentSettings = { ...currentSettings, [key]: value };
+      settings?.set?.(key, value);
+    },
   });
 
   // Extract defaults from settings.json (like iOS Aidoku does)
@@ -80,8 +84,16 @@ export async function loadSource(
   applyManifestDefaults(currentSettings, source.manifest);
   currentSettings = { ...currentSettings, ...userSettings };
 
-  // Now initialize with defaults populated
-  source.initialize();
+  // Retry network-bound calls after a Cloudflare challenge is cleared
+  const cfRetry = createCfRetry(agentUrl, cloudflareSolver);
+
+  // Now initialize with defaults populated; start() may hit a challenge too
+  try {
+    await cfRetry(() => source.initialize());
+  } catch (e) {
+    source.dispose();
+    throw e;
+  }
 
   // Subscribe to settings changes if available
   let unsubscribe: (() => void) | undefined;
@@ -95,14 +107,14 @@ export async function loadSource(
     });
   }
 
-  // Create CF retry wrapper
-  const cfRetry = createCfRetry(agentUrl, cloudflareSolver);
-
   // Create and return async wrapper
   return createAsyncWrapper(
     source,
     cfRetry,
     (newSettings) => { currentSettings = newSettings; },
-    () => { unsubscribe?.(); }
+    () => {
+      unsubscribe?.();
+      source.dispose();
+    }
   );
 }
