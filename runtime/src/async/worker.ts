@@ -115,9 +115,8 @@ class WorkerSource {
       applyManifestDefaults(this.settings, this.source.manifest);
       this.settings = { ...this.settings, ...initialSettings };
 
-      // Now initialize with defaults populated
-      this.source.initialize();
-
+      // The main thread calls initialize() next, so a Cloudflare challenge
+      // raised by the source's start() can be solved and retried there.
       return {
         success: true,
         settingsJson: this.source.settingsJson,
@@ -127,6 +126,14 @@ class WorkerSource {
       console.error("[Worker] Failed to load source:", e);
       return { success: false };
     }
+  }
+
+  /**
+   * Run the source's start(), once load() has populated its settings.
+   * Throws CloudflareBlockedError when start() hits a challenge.
+   */
+  initialize(): void {
+    this.source?.initialize();
   }
 
   /**

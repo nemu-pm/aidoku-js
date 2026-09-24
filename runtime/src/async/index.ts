@@ -137,6 +137,17 @@ export async function loadSource(
   const manifest = result.manifest;
   const settingsJson = result.settingsJson;
 
+  // Retry network-bound calls after a Cloudflare challenge is cleared
+  const cfRetry = createCfRetry(agentUrl, cloudflareSolver);
+
+  // Initialize with defaults populated; start() may hit a challenge too
+  try {
+    await cfRetry(() => workerSource.initialize());
+  } catch (e) {
+    worker.terminate();
+    throw e;
+  }
+
   // Subscribe to settings changes if available
   let unsubscribe: (() => void) | undefined;
   if (settings?.subscribe) {
@@ -145,9 +156,6 @@ export async function loadSource(
       workerSource.updateSettings(newSettings);
     });
   }
-
-  // Retry network-bound calls after a Cloudflare challenge is cleared
-  const cfRetry = createCfRetry(agentUrl, cloudflareSolver);
 
   // Return async wrapper
   const source: AsyncAidokuSource = {
@@ -208,15 +216,15 @@ export async function loadSource(
     },
 
     async handleBasicLogin(key, username, password) {
-      return workerSource.handleBasicLogin(key, username, password);
+      return cfRetry(() => workerSource.handleBasicLogin(key, username, password));
     },
 
     async handleWebLogin(key, cookies) {
-      return workerSource.handleWebLogin(key, cookies);
+      return cfRetry(() => workerSource.handleWebLogin(key, cookies));
     },
 
     async handleNotification(notification) {
-      return workerSource.handleNotification(notification);
+      return cfRetry(() => workerSource.handleNotification(notification));
     },
 
     async getHome() {
