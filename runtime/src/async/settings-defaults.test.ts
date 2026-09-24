@@ -42,6 +42,8 @@ describe("extractSettingsDefaults", () => {
     const defaults = extractSettingsDefaults([
       { type: "text", key: "text", default: "reader" },
       { type: "select", key: "select", default: "en" },
+      { type: "picker", key: "picker", default: "webtoon" },
+      { type: "picker", key: "wrong-picker", default: 2 },
       { type: "switch", key: "enabled", default: true },
       { type: "stepper", key: "count", minimumValue: 5, maximumValue: 50, default: 500 },
       { type: "slider", key: "zoom", min: 2, max: 1, default: 0 },
@@ -68,6 +70,7 @@ describe("extractSettingsDefaults", () => {
     expect(defaults).toEqual({
       text: "reader",
       select: "en",
+      picker: "webtoon",
       enabled: true,
       count: 50,
       zoom: 1,

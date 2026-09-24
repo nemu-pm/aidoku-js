@@ -36,6 +36,7 @@ const SETTING_DEFAULT_LIMITS = Object.freeze({
 /** Setting types that carry a default value */
 const SETTING_DEFAULT_TYPES = new Set([
   "select",
+  "picker",
   "multi-select",
   "multi-single-select",
   "switch",
@@ -161,7 +162,8 @@ function sanitizeSettingDefault(
   record: object,
   remainingStringChars: number
 ): SanitizedDefault | null {
-  if (type === "select" || type === "text") {
+  // A picker is a select presented as a wheel; both hold the chosen value.
+  if (type === "select" || type === "picker" || type === "text") {
     return sanitizeStringDefault(value, remainingStringChars);
   }
   if (type === "multi-select" ||
