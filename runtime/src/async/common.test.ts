@@ -43,6 +43,7 @@ function createSource(
     modifyImageRequest,
     processPageImage: async () => null,
     processCoverImage: async (imageData) => imageData,
+    dispose() {},
   };
 }
 

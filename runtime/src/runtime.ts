@@ -159,6 +159,11 @@ export interface AidokuSource {
     responseCode: number,
     responseHeaders: Record<string, string>
   ): Promise<Uint8Array | null>;
+  /**
+   * Release the source's host-side state: descriptors, requests and the
+   * store's cleanup timer. The source must not be called afterwards.
+   */
+  dispose(): void;
 }
 
 export interface AidokuRuntimeOptions {
@@ -172,6 +177,16 @@ export interface AidokuRuntimeOptions {
   canvasModule?: CanvasModule;
   /** Clock the source observes for dates and sleeps (defaults to real time) */
   clock?: RuntimeClock;
+  /**
+   * The source's WASM, already compiled.
+   *
+   * A compiled module is immutable, so a host that loads the same source many
+   * times (for example a fresh instance per replayed call) can compile once
+   * and pass the module here; each load still gets fresh memory and state. It
+   * must be compiled from the same bytes as `input`. With a module the
+   * instance is created synchronously (`new WebAssembly.Instance`).
+   */
+  compiledModule?: WebAssembly.Module;
 }
 
 /**
@@ -220,7 +235,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
     sourceKey: string,
     options: AidokuRuntimeOptions
   ): Promise<AidokuSource> {
-    const { httpBridge, settingsGetter = () => undefined, settingsSetter, canvasModule = defaultCanvasModule } = options;
+    const { httpBridge, settingsGetter = () => undefined, settingsSetter, canvasModule = defaultCanvasModule, compiledModule } = options;
     const { createCanvasImports, createHostImage, getHostImageData } = canvasModule;
     const store = new GlobalStore(sourceKey);
 
@@ -269,8 +284,10 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
   };
 
   // Compile and instantiate WASM module
-  const module = await WebAssembly.compile(wasmBytes);
-  const instance = await WebAssembly.instantiate(module, importObject);
+  const module = compiledModule ?? await WebAssembly.compile(wasmBytes);
+  const instance = compiledModule
+    ? new WebAssembly.Instance(module, importObject)
+    : await WebAssembly.instantiate(module, importObject);
 
   // Get memory and set it in the store
   const memory = instance.exports.memory as WebAssembly.Memory;
@@ -1321,6 +1338,10 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
         console.error("[Aidoku] getListings error:", e);
         return [];
       }
+    },
+
+    dispose() {
+      store.destroy();
     },
   };
   };
