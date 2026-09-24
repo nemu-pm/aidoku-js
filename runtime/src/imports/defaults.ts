@@ -75,6 +75,15 @@ export function createDefaultsImports(
     if (Array.isArray(value)) {
       return encodeVecString(value.map(String));
     }
+    // Data values (defaults_set_data) are stored as the postcard bytes the
+    // source encoded, and defaults_get deserializes the rid's bytes as-is, so
+    // they go back unchanged.
+    if (ArrayBuffer.isView(value)) {
+      return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
+    }
+    if (Object.prototype.toString.call(value) === "[object ArrayBuffer]") {
+      return new Uint8Array(value as ArrayBuffer).slice();
+    }
     // For objects/other types, try JSON as string
     return encodeString(JSON.stringify(value));
   }
