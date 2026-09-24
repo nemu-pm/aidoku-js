@@ -9,6 +9,7 @@ import type {
   Page,
   MangaPageResult,
   Filter,
+  FilterInfo,
   FilterValue,
   SelectFilter,
   SourceManifest,
@@ -515,6 +516,29 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
     }
   }
 
+  // Filters the source reports through get_filters
+  function getFiltersImpl(): Filter[] {
+    if (!getFilterList) return [];
+
+    try {
+      const resultPtr = getFilterList();
+      const resultBytes = readResult(resultPtr);
+
+      if (freeResult && resultPtr > 0) {
+        freeResult(resultPtr);
+      }
+
+      if (!resultBytes) return [];
+
+      const decodedFilters = decodeFilterList(resultBytes);
+      return decodedFilters.map(convertDecodedFilter);
+    } catch (e) {
+      if (e instanceof CloudflareBlockedError) throw e;
+      console.error("[Aidoku] getFilterList error:", e);
+      return [];
+    }
+  }
+
   // Implementation of getHome with optional partial streaming callback
   function getHomeImpl(onPartial: (layout: HomeLayout) => void): HomeLayout | null {
     if (!getHome) return null;
@@ -675,7 +699,6 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
     },
 
     getSearchMangaList(
-      this: AidokuSource,
       query: string | null,
       page: number,
       filters: FilterValue[]
@@ -697,8 +720,13 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
             genre: 9,
           };
 
-          // Legacy sources read a select value as an option index.
-          const legacyFilterDefinitions = this.getFilters();
+          // Legacy sources read a select value as an option index. Their
+          // filters are declared in filters.json (the manifest); get_filters
+          // is only asked when a select is not declared there.
+          let runtimeFilters: Filter[] | null = null;
+          const selectDefinition = (name: string): LegacySelectDefinition | undefined =>
+            findManifestSelect(manifest.filters, name) ??
+            findSelectFilter((runtimeFilters ??= getFiltersImpl()), name);
 
           const convertToSwiftFilter = (f: FilterValue): unknown => {
             switch (f.type) {
@@ -710,7 +738,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
                 return {
                   type: SwiftFilterType.select,
                   name: f.name,
-                  value: resolveLegacySelectIndex(f, legacyFilterDefinitions),
+                  value: resolveLegacySelectIndex(f, selectDefinition(f.name)),
                 };
               case FilterType.Sort:
                 return { type: SwiftFilterType.sort, name: f.name, value: f.value };
@@ -1087,25 +1115,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
     },
 
     getFilters(): Filter[] {
-      if (!getFilterList) return [];
-
-      try {
-        const resultPtr = getFilterList();
-        const resultBytes = readResult(resultPtr);
-
-        if (freeResult && resultPtr > 0) {
-          freeResult(resultPtr);
-        }
-
-        if (!resultBytes) return [];
-
-        const decodedFilters = decodeFilterList(resultBytes);
-        return decodedFilters.map(convertDecodedFilter);
-      } catch (e) {
-        if (e instanceof CloudflareBlockedError) throw e;
-        console.error("[Aidoku] getFilterList error:", e);
-        return [];
-      }
+      return getFiltersImpl();
     },
 
     modifyImageRequest(
@@ -1367,17 +1377,24 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
   };
 }
 
+/** The options of a select filter, from filters.json or get_filters. */
+export interface LegacySelectDefinition {
+  options?: unknown;
+  ids?: unknown;
+}
+
 /**
  * The option index a legacy (Swift-era) source expects for a select filter.
  *
  * Legacy sources read a select filter's value as the selected option's index,
  * while hosts may send the option's id or label. An integer is used as-is; a
- * string is looked up in the matching select definition's `ids`, then its
- * `options` (the definition is found by name, searching into groups), then
+ * string is looked up in the definition's `ids`, then its `options`, then
  * parsed as an integer. Anything else selects the first option.
  */
-export function resolveLegacySelectIndex(filter: FilterValue, definitions: Filter[]): number {
-  const definition = findSelectFilter(definitions, filter.name);
+export function resolveLegacySelectIndex(
+  filter: FilterValue,
+  definition: LegacySelectDefinition | undefined
+): number {
   const options = Array.isArray(definition?.options) ? definition.options : [];
   const ids = Array.isArray(definition?.ids) ? definition.ids : [];
   const value = filter.value;
@@ -1392,6 +1409,33 @@ export function resolveLegacySelectIndex(filter: FilterValue, definitions: Filte
     if (Number.isInteger(numericIndex)) return numericIndex;
   }
   return 0;
+}
+
+/**
+ * Find a select filter declared in filters.json, searching into groups.
+ *
+ * The name a host sends is the filter's display name, which filters.json
+ * spells `title` (aidoku-rs) or `name` (Swift-era); `id` is matched too. Both
+ * the string types of filters.json and numeric FilterType values are accepted.
+ */
+export function findManifestSelect(
+  filters: FilterInfo[] | undefined,
+  name: string
+): FilterInfo | undefined {
+  if (!Array.isArray(filters)) return undefined;
+  for (const filter of filters) {
+    if (!filter || typeof filter !== "object") continue;
+    const type = filter.type as unknown;
+    if (type === "select" || type === FilterType.Select) {
+      if (filter.title === name || filter.name === name || (filter.id != null && String(filter.id) === name)) {
+        return filter;
+      }
+    } else if (type === "group" || type === FilterType.Group) {
+      const nested = findManifestSelect(filter.filters, name);
+      if (nested) return nested;
+    }
+  }
+  return undefined;
 }
 
 function findSelectFilter(filters: Filter[], name: string): SelectFilter | undefined {
