@@ -21,6 +21,7 @@ import type {
   HomeLayout,
   HomeComponent,
   HttpBridge,
+  JsEvaluator,
   RuntimeClock,
 } from "./types";
 import { FilterType } from "./types";
@@ -192,6 +193,12 @@ export interface AidokuRuntimeOptions {
    * instance is created synchronously (`new WebAssembly.Instance`).
    */
   compiledModule?: WebAssembly.Module;
+  /**
+   * Engine for the `js` import module (`JsContext` create/eval/get). Defaults
+   * to an in-process evaluator built on the Function constructor, which needs
+   * `unsafe-eval`; supply one to run source scripts in an isolated engine.
+   */
+  jsEvaluator?: JsEvaluator;
 }
 
 /**
@@ -285,7 +292,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
     defaults: createDefaultsImports(store, settingsGetter, settingsSetter),
     aidoku: createAidokuImports(store),
     canvas: createCanvasImports(store),
-    js: createJsImports(store),
+    js: createJsImports(store, options.jsEvaluator),
   };
 
   // Compile and instantiate WASM module

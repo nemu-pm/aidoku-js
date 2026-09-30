@@ -61,6 +61,52 @@ export interface RuntimeClock {
   sleep?: (seconds: number) => void;
 }
 
+/**
+ * One JavaScript context created by a {@link JsEvaluator}, backing a single
+ * `js.context_create` resource. Every member is SYNCHRONOUS, like HttpBridge,
+ * since WASM calls block.
+ *
+ * Results follow Aidoku iOS, which stringifies the resulting `JSValue`
+ * (`JSValue.toString()`): `undefined` becomes `"undefined"`, objects become
+ * `"[object Object]"`, and a script that throws yields `"undefined"`. Return
+ * `null` for "no result"; the source then sees `JsError::MissingResult`.
+ *
+ * Anything these methods throw propagates out of the WASM call unchanged, the
+ * same as an HttpBridge exception, so a host can abort (or suspend and replay)
+ * the running source call from inside an evaluation.
+ */
+export interface JsEvaluatorContext {
+  /** `js.context_eval`: evaluate a script in this context. */
+  eval(script: string): string | null;
+  /**
+   * `js.context_eval_async`: evaluate `script`, awaiting the promise it
+   * produces (Aidoku wraps it as `await (script)`). Defaults to `eval`.
+   */
+  evalAsync?(script: string): string | null;
+  /** `js.context_get`: read a global of this context. */
+  get(name: string): string | null;
+  /**
+   * Release the context. Called once, when the source destroys the resource
+   * (`std.destroy`, i.e. `JsContext` drop) or when the source is disposed.
+   */
+  dispose?(): void;
+}
+
+/**
+ * Host-supplied JavaScript engine for the `js` import module.
+ *
+ * Aidoku sources evaluate scripts through `aidoku::imports::js::JsContext`;
+ * Aidoku iOS backs each context with its own isolated JavaScriptCore
+ * `JSContext`. Without an evaluator the runtime evaluates scripts in-process
+ * with the `Function` constructor, which needs `unsafe-eval` and shares the
+ * host realm. A host that must not allow either (for example a locked-down
+ * sandbox) supplies an evaluator that runs scripts in a separate engine.
+ */
+export interface JsEvaluator {
+  /** `js.context_create`: open a fresh, empty context. */
+  createContext(): JsEvaluatorContext;
+}
+
 // ============================================================================
 // Core Manga Types
 // ============================================================================

@@ -310,6 +310,9 @@ export class GlobalStore {
         this.stats.totalRequestsCleaned++;
         return true;
       case ResourceType.JsContext:
+        this.disposeJsContext(rid);
+        this.forceRemoveStdValue(rid);
+        return true;
       case ResourceType.Canvas:
       case ResourceType.Image:
       case ResourceType.Font:
@@ -319,6 +322,22 @@ export class GlobalStore {
       default:
         this.resources.delete(rid);
         return false;
+    }
+  }
+
+  /**
+   * Release a host JS context (see JsEvaluatorContext.dispose). A throwing
+   * host dispose must not keep the rest of the store from being released.
+   */
+  private disposeJsContext(rid: number): void {
+    const context = this.descriptors.get(rid)?.value as
+      | { dispose?: unknown }
+      | undefined;
+    if (typeof context?.dispose !== "function") return;
+    try {
+      (context.dispose as () => void).call(context);
+    } catch (error) {
+      console.warn("[GlobalStore] JS context dispose failed:", error);
     }
   }
 
@@ -487,6 +506,9 @@ export class GlobalStore {
 
   /** Reset all state */
   reset(): void {
+    for (const [rid, type] of this.resources) {
+      if (type === ResourceType.JsContext) this.disposeJsContext(rid);
+    }
     this.descriptors.clear();
     this.requests.clear();
     this.resources.clear();

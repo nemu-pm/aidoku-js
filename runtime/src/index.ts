@@ -84,6 +84,8 @@ export type {
   HttpRequest,
   HttpResponse,
   RuntimeClock,
+  JsEvaluator,
+  JsEvaluatorContext,
 } from "./types";
 
 // Enums

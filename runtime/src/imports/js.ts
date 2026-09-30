@@ -1,7 +1,8 @@
 /**
  * js namespace - JavaScript execution context
  */
-import type { GlobalStore } from "../global-store";
+import { ResourceType, type GlobalStore } from "../global-store";
+import type { JsEvaluator, JsEvaluatorContext } from "../types";
 
 // Result codes matching Rust implementation
 const JsResult = {
@@ -11,10 +12,11 @@ const JsResult = {
 } as const;
 
 /**
- * Simple JavaScript execution context
- * Uses Function constructor for sandboxed evaluation
+ * Built-in JavaScript execution context, used when the host supplies no
+ * JsEvaluator. It evaluates with the Function constructor in the host realm,
+ * so it needs `unsafe-eval` and is not isolated from the embedding page.
  */
-class JsContext {
+class JsContext implements JsEvaluatorContext {
   private variables: Map<string, unknown> = new Map();
 
   /**
@@ -101,11 +103,7 @@ class JsContext {
   }
 }
 
-export function createJsImports(store: GlobalStore) {
-  // Map of context RIDs to JsContext instances
-  const contexts = new Map<number, JsContext>();
-  let nextContextId = 1;
-
+export function createJsImports(store: GlobalStore, evaluator?: JsEvaluator) {
   // Webviews are unsupported here; log the first call per import so a source
   // relying on one is diagnosable without flooding the console.
   const loggedUnsupported = new Set<string>();
@@ -118,89 +116,80 @@ export function createJsImports(store: GlobalStore) {
   };
 
   /**
-   * Evaluate JavaScript code in a context.
-   * @param contextRid - Context RID
-   * @param stringPtr - Pointer to JS code string
-   * @param stringLen - Length of JS code string
-   * Returns: String descriptor with result, or negative error code
+   * Resolve a context RID and the string argument, in Aidoku iOS's order: an
+   * unknown context wins over a bad string.
    */
-  const contextEval = (contextRid: number, stringPtr: number, stringLen: number): number => {
-    if (stringLen <= 0) {
-      return JsResult.InvalidString;
-    }
-
-    const context = contexts.get(contextRid);
+  const resolve = (
+    contextRid: number,
+    stringPtr: number,
+    stringLen: number
+  ): { context: JsEvaluatorContext; text: string } | number => {
+    const context =
+      store.getResourceType(contextRid) === ResourceType.JsContext
+        ? (store.readStdValue(contextRid) as JsEvaluatorContext | undefined)
+        : undefined;
     if (!context) {
-      console.error(`[js.context_eval] Invalid context: ${contextRid}`);
       return JsResult.InvalidContext;
     }
-
-    const code = store.readString(stringPtr, stringLen);
-    if (!code) {
+    if (stringPtr < 0 || stringLen <= 0) {
       return JsResult.InvalidString;
     }
-
-    console.debug(`[js.context_eval] Evaluating in context ${contextRid}:`, code.slice(0, 100));
-
-    const result = context.eval(code);
-    if (result === null) {
-      return JsResult.MissingResult;
+    const text = store.readString(stringPtr, stringLen);
+    if (!text) {
+      return JsResult.InvalidString;
     }
-
-    // Store result string and return its descriptor
-    return store.storeStdValue(result);
+    return { context, text };
   };
+
+  const storeResult = (result: string | null): number =>
+    result === null ? JsResult.MissingResult : store.storeStdValue(result);
 
   return {
     /**
-     * Create a new JavaScript context
+     * Create a new JavaScript context.
+     * The context lives in the global store as a JsContext resource, so the
+     * source's `JsContext` drop (`std.destroy`) releases it, as on Aidoku iOS.
      * Returns: RID (resource ID) for the context
      */
     context_create: (): number => {
-      const rid = nextContextId++;
-      contexts.set(rid, new JsContext());
-      console.debug(`[js.context_create] Created context ${rid}`);
+      const context = evaluator ? evaluator.createContext() : new JsContext();
+      const rid = store.storeStdValue(context);
+      store.registerResource(rid, ResourceType.JsContext);
       return rid;
     },
 
-    /** Evaluate JavaScript code in a context */
-    context_eval: contextEval,
+    /**
+     * Evaluate JavaScript code in a context.
+     * Returns: String descriptor with result, or negative error code
+     */
+    context_eval: (contextRid: number, stringPtr: number, stringLen: number): number => {
+      const resolved = resolve(contextRid, stringPtr, stringLen);
+      if (typeof resolved === "number") return resolved;
+      return storeResult(resolved.context.eval(resolved.text));
+    },
 
     /**
      * Evaluate JavaScript code in a context, awaiting a promise result.
-     * Context evaluation here is synchronous, so this behaves exactly like
-     * context_eval: a returned promise is stringified rather than awaited.
+     * The built-in context is synchronous, so there a returned promise is
+     * stringified rather than awaited; a host evaluator may await it.
      */
-    context_eval_async: contextEval,
+    context_eval_async: (contextRid: number, stringPtr: number, stringLen: number): number => {
+      const resolved = resolve(contextRid, stringPtr, stringLen);
+      if (typeof resolved === "number") return resolved;
+      const { context, text } = resolved;
+      return storeResult(
+        context.evalAsync ? context.evalAsync(text) : context.eval(text)
+      );
+    },
 
     /**
-     * Get a variable from a context
-     * @param contextRid - Context RID
-     * @param stringPtr - Pointer to variable name
-     * @param stringLen - Length of variable name
+     * Get a global variable from a context.
      * Returns: String descriptor with value, or negative error code
      */
     context_get: (contextRid: number, stringPtr: number, stringLen: number): number => {
-      if (stringLen <= 0) {
-        return JsResult.InvalidString;
-      }
-
-      const context = contexts.get(contextRid);
-      if (!context) {
-        return JsResult.InvalidContext;
-      }
-
-      const varName = store.readString(stringPtr, stringLen);
-      if (!varName) {
-        return JsResult.InvalidString;
-      }
-
-      const result = context.get(varName);
-      if (result === null) {
-        return JsResult.MissingResult;
-      }
-
-      return store.storeStdValue(result);
+      const resolved = resolve(contextRid, stringPtr, stringLen);
+      if (typeof resolved === "number") return resolved;
+      return storeResult(resolved.context.get(resolved.text));
     },
 
     // Webview stubs. Every symbol a source may import has to exist, otherwise
