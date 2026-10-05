@@ -18,6 +18,8 @@ export interface WasmResponse {
   data?: Uint8Array;
   statusCode?: number;
   headers?: Record<string, string>;
+  /** Final URL after redirects; unset when the request failed. */
+  url?: string;
   bytesRead: number;
 }
 
