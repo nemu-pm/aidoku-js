@@ -63,4 +63,57 @@ describe("html imports", () => {
     const gone = imports.select(doc, 256, 7);
     expect(imports.size(gone)).toBe(0);
   });
+  /** Write strings at fixed offsets and return their [ptr, len] pairs. */
+  function strings(...values: string[]): [number, number][] {
+    return values.map((value, i) => {
+      const ptr = 512 + i * 128;
+      store!.writeString(value, ptr);
+      return [ptr, new TextEncoder().encode(value).length];
+    });
+  }
+
+  function outerHtml(imports: ReturnType<typeof createHtmlImports>, rid: number): string {
+    return store!.readStdValue(imports.outer_html(rid)) as string;
+  }
+
+  it("set_attr and remove_attr edit an element's attributes", () => {
+    const { imports, doc } = parse("<img data-src='a.jpg' alt='x'>");
+    const [[sel, selLen], [src, srcLen], [url, urlLen], [alt, altLen]] = strings(
+      "img",
+      "src",
+      "b.jpg",
+      "alt"
+    );
+    const img = imports.select_first(doc, sel, selLen);
+
+    expect(imports.set_attr(img, src, srcLen, url, urlLen)).toBe(0);
+    expect(imports.remove_attr(img, alt, altLen)).toBe(0);
+    expect(outerHtml(imports, img)).toBe('<img data-src="a.jpg" src="b.jpg">');
+  });
+
+  it("add_class and remove_class edit an element's classes", () => {
+    const { imports, doc } = parse("<p class='a b'>x</p>");
+    const [[sel, selLen], [c, cLen], [a, aLen]] = strings("p", "c", "a");
+    const p = imports.select_first(doc, sel, selLen);
+
+    expect(imports.add_class(p, c, cLen)).toBe(0);
+    expect(imports.remove_class(p, a, aLen)).toBe(0);
+    expect(outerHtml(imports, p)).toBe('<p class="b c">x</p>');
+  });
+
+  it("attribute and class mutations reject bad descriptors and empty strings", () => {
+    const { imports, doc } = parse("<p>x</p>");
+    const [[sel, selLen], [key, keyLen]] = strings("p", "id");
+    const p = imports.select_first(doc, sel, selLen);
+
+    expect(imports.set_attr(-1, key, keyLen, key, keyLen)).toBe(-1);
+    expect(imports.set_attr(p, key, 0, key, keyLen)).toBe(-2);
+    expect(imports.set_attr(p, key, keyLen, key, 0)).toBe(-2);
+    expect(imports.remove_attr(9999, key, keyLen)).toBe(-1);
+    expect(imports.remove_attr(p, key, 0)).toBe(-2);
+    expect(imports.add_class(-1, key, keyLen)).toBe(-1);
+    expect(imports.add_class(p, key, 0)).toBe(-2);
+    expect(imports.remove_class(-1, key, keyLen)).toBe(-1);
+    expect(imports.remove_class(p, key, 0)).toBe(-2);
+  });
 });
