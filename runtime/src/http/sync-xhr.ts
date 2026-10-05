@@ -69,6 +69,8 @@ export function createSyncXhrBridge(options: SyncXhrOptions = {}): HttpBridge {
           headers,
           body,
           bytes,
+          // Through a proxy, responseURL is the proxy's URL, not the target's.
+          url: targetUrl === req.url ? xhr.responseURL || undefined : undefined,
         };
       } catch (e) {
         console.error("[SyncXHR] Request failed:", req.url, e);
