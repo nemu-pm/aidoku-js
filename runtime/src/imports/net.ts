@@ -81,7 +81,22 @@ function getRequestUserAgent(headers: Record<string, string>): string | undefine
 // Default User-Agent for requests
 const DEFAULT_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 
-export function createNetImports(store: GlobalStore, httpBridge: HttpBridge) {
+export interface NetImportOptions {
+  /**
+   * Whether the loaded source uses the legacy (Swift-era) ABI. Read at call
+   * time, since the ABI is only known once the module is instantiated. Only
+   * `get_url` differs between the ABIs.
+   */
+  isLegacyAbi?: () => boolean;
+}
+
+export function createNetImports(
+  store: GlobalStore,
+  httpBridge: HttpBridge,
+  options: NetImportOptions = {}
+) {
+  const isLegacyAbi = options.isLegacyAbi ?? (() => false);
+
   const send = (descriptor: number): number => {
     if (descriptor < 0) return RequestError.InvalidDescriptor;
     const req = store.requests.get(descriptor);
@@ -142,6 +157,7 @@ export function createNetImports(store: GlobalStore, httpBridge: HttpBridge) {
         data,
         statusCode: response.status,
         headers: responseHeaders,
+        url: response.url || req.url,
         bytesRead: 0,
       };
       return 0;
@@ -326,6 +342,24 @@ export function createNetImports(store: GlobalStore, httpBridge: HttpBridge) {
       if (!req) return RequestError.InvalidDescriptor;
       if (!req.response) return RequestError.MissingResponse;
       return req.response.statusCode ?? 0;
+    },
+
+    // aidoku-rs: get_url(rid) -> FFIResult, the response's final URL after
+    // redirects (AidokuRunner Net.getUrl). Legacy sources read the request URL
+    // through the same import, before or after sending (Swift WasmNet.get_url).
+    get_url: (descriptor: number): number => {
+      if (descriptor < 0) return RequestError.InvalidDescriptor;
+      const req = store.requests.get(descriptor);
+      if (!req) return RequestError.InvalidDescriptor;
+
+      if (isLegacyAbi()) {
+        return req.url ? store.storeStdValue(req.url) : RequestError.InvalidDescriptor;
+      }
+
+      // A failed send leaves a placeholder response without a URL; iOS has no
+      // response at all then.
+      if (!req.response?.url) return RequestError.MissingResponse;
+      return store.storeStdValue(req.response.url);
     },
 
     html: (descriptor: number): number => {

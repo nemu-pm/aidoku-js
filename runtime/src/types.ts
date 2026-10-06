@@ -29,6 +29,11 @@ export interface HttpResponse {
   body: string;
   /** Raw bytes for binary responses (images, etc.) */
   bytes: Uint8Array | null;
+  /**
+   * Final URL of the response after redirects (aidoku-rs `Response::get_url`).
+   * Defaults to the request URL when omitted.
+   */
+  url?: string;
 }
 
 /**

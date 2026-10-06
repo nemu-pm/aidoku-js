@@ -581,6 +581,52 @@ export function createHtmlImports(store: GlobalStore) {
       return node.first().attr(attrName) !== undefined ? 1 : 0;
     },
 
+    // aidoku-rs 0.8 mutations (AidokuRunner Html.swift). iOS reads every string
+    // with a positive length, so an empty key, value or class is InvalidString.
+    set_attr: (
+      descriptor: number,
+      keyPtr: number,
+      keyLen: number,
+      valuePtr: number,
+      valueLen: number
+    ): number => {
+      const node = getNode(store, descriptor);
+      if (!node) return HtmlError.InvalidDescriptor;
+      const key = keyLen > 0 ? store.readString(keyPtr, keyLen) : null;
+      if (!key) return HtmlError.InvalidString;
+      const value = valueLen > 0 ? store.readString(valuePtr, valueLen) : null;
+      if (!value) return HtmlError.InvalidString;
+      node.attr(key, value);
+      return 0;
+    },
+
+    remove_attr: (descriptor: number, keyPtr: number, keyLen: number): number => {
+      const node = getNode(store, descriptor);
+      if (!node) return HtmlError.InvalidDescriptor;
+      const key = keyLen > 0 ? store.readString(keyPtr, keyLen) : null;
+      if (!key) return HtmlError.InvalidString;
+      node.removeAttr(key);
+      return 0;
+    },
+
+    add_class: (descriptor: number, classPtr: number, classLen: number): number => {
+      const node = getNode(store, descriptor);
+      if (!node) return HtmlError.InvalidDescriptor;
+      const className = classLen > 0 ? store.readString(classPtr, classLen) : null;
+      if (!className) return HtmlError.InvalidString;
+      node.addClass(className);
+      return 0;
+    },
+
+    remove_class: (descriptor: number, classPtr: number, classLen: number): number => {
+      const node = getNode(store, descriptor);
+      if (!node) return HtmlError.InvalidDescriptor;
+      const className = classLen > 0 ? store.readString(classPtr, classLen) : null;
+      if (!className) return HtmlError.InvalidString;
+      node.removeClass(className);
+      return 0;
+    },
+
     // ElementList methods
     first: (descriptor: number): number => {
       if (descriptor < 0) return HtmlError.InvalidDescriptor;

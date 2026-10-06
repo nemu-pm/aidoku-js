@@ -282,11 +282,14 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
     }
   }
 
+  // Known once the module is instantiated; read lazily by net.get_url.
+  let isLegacyAbi = false;
+
   // Create import object with all namespaces
   const importObject: WebAssembly.Imports = {
     env: createEnvImports(store, options.clock),
     std: createStdImports(store, options.clock),
-    net: createNetImports(store, httpBridge),
+    net: createNetImports(store, httpBridge, { isLegacyAbi: () => isLegacyAbi }),
     html: createHtmlImports(store),
     json: createJsonImports(store),
     defaults: createDefaultsImports(store, settingsGetter, settingsSetter),
@@ -311,6 +314,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
   // Detect runtime mode
   const mode = detectRuntimeMode(exports);
   const isNewAbi = mode === RuntimeMode.AidokuRs;
+  isLegacyAbi = !isNewAbi;
 
   // NEW ABI exports
   const start = exports.start as (() => void) | undefined;
