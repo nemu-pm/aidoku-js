@@ -17,6 +17,10 @@ import type {
 /**
  * Custom fetch function type
  * Used for routing HTTP through agent/extension
+ *
+ * The response's final URL (`net.get_url`) is its `X-Nemu-Final-Url` header
+ * when set, else `Response.url` if the fetch was redirected, else the
+ * request URL.
  */
 export type CustomFetchFn = (url: string, init: RequestInit) => Promise<Response>;
 
@@ -68,6 +72,10 @@ export interface AsyncLoadOptions {
    * 
    * The source URL will be appended (URL-encoded).
    * Example: "https://cors.proxy.io/?url=" 
+   *
+   * A proxy that follows redirects should report the target's final URL in
+   * an exposed `X-Nemu-Final-Url` response header; without it `net.get_url`
+   * returns the request URL.
    */
   proxyUrl?: string;
 

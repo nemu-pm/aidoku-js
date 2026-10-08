@@ -5,6 +5,7 @@
  * Sync XHR on the main thread blocks the UI.
  */
 import type { HttpBridge, HttpRequest, HttpResponse } from "../types";
+import { resolveFinalUrl } from "./final-url";
 
 export interface SyncXhrOptions {
   /** Transform URLs (e.g., for CORS proxy) */
@@ -69,8 +70,9 @@ export function createSyncXhrBridge(options: SyncXhrOptions = {}): HttpBridge {
           headers,
           body,
           bytes,
-          // Through a proxy, responseURL is the proxy's URL, not the target's.
-          url: targetUrl === req.url ? xhr.responseURL || undefined : undefined,
+          // Through a proxy, responseURL is the proxy's URL, not the target's;
+          // the proxy reports the target's final URL in a header instead.
+          url: resolveFinalUrl(headers, targetUrl === req.url ? xhr.responseURL : undefined),
         };
       } catch (e) {
         console.error("[SyncXHR] Request failed:", req.url, e);

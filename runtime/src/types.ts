@@ -31,7 +31,9 @@ export interface HttpResponse {
   bytes: Uint8Array | null;
   /**
    * Final URL of the response after redirects (aidoku-rs `Response::get_url`).
-   * Defaults to the request URL when omitted.
+   * Defaults to the request URL when omitted. The bundled bridges take it
+   * from a proxy's `X-Nemu-Final-Url` header when present (see
+   * `resolveFinalUrl`).
    */
   url?: string;
 }

@@ -26,6 +26,7 @@ export { createLoadSource, type AidokuSource, type AidokuRuntimeOptions, type Ca
 
 // HTTP bridge utilities
 export { createSyncXhrBridge, type SyncXhrOptions } from "./http/sync-xhr";
+export { FINAL_URL_HEADER, resolveFinalUrl } from "./http/final-url";
 
 // AIX extraction utilities
 export { extractAix, isAixPackage, type AixContents } from "./aix";

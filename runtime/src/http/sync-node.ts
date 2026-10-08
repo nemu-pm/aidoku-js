@@ -8,6 +8,7 @@
  */
 import type { HttpBridge, HttpRequest, HttpResponse } from "../types";
 import { spawnSync } from "child_process";
+import { resolveFinalUrl } from "./final-url";
 
 export interface SyncNodeHttpOptions {
   /** Transform URLs (e.g., for proxy) */
@@ -185,7 +186,8 @@ export function createSyncNodeBridge(options: SyncNodeHttpOptions = {}): HttpBri
           // Binary response
         }
 
-        // Through a proxy, curl's effective URL is the proxy's, not the target's.
+        // Through a proxy, curl's effective URL is the proxy's, not the target's;
+        // the proxy reports the target's final URL in a header instead.
         const effectiveUrl = targetUrl === req.url
           ? parseEffectiveUrl(result.stderr?.toString("utf-8") ?? "")
           : undefined;
@@ -195,7 +197,7 @@ export function createSyncNodeBridge(options: SyncNodeHttpOptions = {}): HttpBri
           headers: parsed.headers,
           body,
           bytes: parsed.bytes,
-          url: effectiveUrl,
+          url: resolveFinalUrl(parsed.headers, effectiveUrl),
         };
       } catch (e) {
         console.error("[SyncNodeHttp] Request failed:", req.url, e);
@@ -347,6 +349,7 @@ function createAgentBridge(
           headers: respHeaders,
           body: new TextDecoder("utf-8", { fatal: false }).decode(bytes),
           bytes,
+          url: resolveFinalUrl(respHeaders),
         };
       } catch (e) {
         console.error("[AgentBridge] Request failed:", req.url, e);

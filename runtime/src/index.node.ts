@@ -23,6 +23,7 @@ export { createLoadSource, type AidokuSource, type AidokuRuntimeOptions, type Ca
 
 // HTTP bridge utilities
 export { createSyncNodeBridge, type SyncNodeHttpOptions } from "./http/sync-node";
+export { FINAL_URL_HEADER, resolveFinalUrl } from "./http/final-url";
 
 // Canvas initialization for Node.js
 export { initCanvasModule } from "./imports/canvas.node";

@@ -8,12 +8,20 @@
  * - [0]: Control signal (0 = waiting, 1 = response ready)
  * - [1]: Response status code
  * - [2]: Response body length (in bytes)
- * - [3]: Headers JSON length (in bytes)
- * - [4...]: Response body + headers JSON (as UTF-8 bytes)
+ * - [3]: Meta JSON length (in bytes)
+ * - [4...]: Response body + meta JSON `{ headers, url? }` (as UTF-8 bytes)
  * 
  * Requires COOP/COEP headers for SharedArrayBuffer support.
  */
 import type { HttpBridge, HttpRequest, HttpResponse } from "../types";
+import { resolveFinalUrl } from "./final-url";
+
+/** Response metadata written after the body. */
+interface SabResponseMeta {
+  headers: Record<string, string>;
+  /** Final URL after redirects, when known. */
+  url?: string;
+}
 
 // Message types for worker <-> main thread communication
 export interface SabHttpRequest {
@@ -105,14 +113,16 @@ export function createSabWorkerBridge(
       const bodyBytes = new Uint8Array(bodyLength);
       bodyBytes.set(dataView.slice(dataStart, dataStart + bodyLength));
       
-      // Read and parse headers JSON
+      // Read and parse the metadata JSON
       let headers: Record<string, string> = {};
+      let url: string | undefined;
       if (headersLength > 0) {
         const headersStart = dataStart + bodyLength;
         const headersBytes = dataView.slice(headersStart, headersStart + headersLength);
         try {
-          const headersJson = new TextDecoder().decode(headersBytes);
-          headers = JSON.parse(headersJson);
+          const meta = JSON.parse(new TextDecoder().decode(headersBytes)) as SabResponseMeta;
+          headers = meta.headers ?? {};
+          url = typeof meta.url === "string" ? meta.url : undefined;
         } catch (e) {
           console.error("[SabHttp] Failed to parse headers:", e);
         }
@@ -138,6 +148,7 @@ export function createSabWorkerBridge(
         headers,
         body,
         bytes: bodyBytes,
+        url,
       };
     },
   };
@@ -191,8 +202,13 @@ export function createSabMainThreadHandler(
       response.headers.forEach((value, key) => {
         headers[key] = value;
       });
-      const headersJson = JSON.stringify(headers);
-      const headersBytes = new TextEncoder().encode(headersJson);
+      // A fetch that went through a proxy without redirecting ends on the
+      // proxy's URL, so only a redirected response's URL is the target's.
+      const meta: SabResponseMeta = {
+        headers,
+        url: resolveFinalUrl(response.headers, response.redirected ? response.url : undefined),
+      };
+      const headersBytes = new TextEncoder().encode(JSON.stringify(meta));
       
       // Check if response fits in buffer
       const dataStart = DATA_START_INDEX * 4;
