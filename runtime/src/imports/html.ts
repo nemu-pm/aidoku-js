@@ -86,6 +86,67 @@ function getNode(store: GlobalStore, descriptor: number): CheerioWithApi | null 
   return null;
 }
 
+const SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
+
+/**
+ * Resolve `rel` against `base` like SwiftSoup's `StringUtil.resolve` (which backs
+ * `absUrl` / `abs:` attributes on Aidoku iOS):
+ * - without a usable base, only an already-absolute URL survives; anything else is "";
+ * - with a base, relative, root-relative, protocol-relative (takes the base's
+ *   scheme) and empty values resolve against it; an absolute value is kept as is;
+ * - if resolution fails, the base itself is returned.
+ */
+export function resolveUrl(base: string, rel: string): string {
+  if (SCHEME_RE.test(rel)) {
+    try {
+      new URL(rel);
+      return rel;
+    } catch {
+      // Not a parseable absolute URL; treat it as relative below.
+    }
+  }
+  let baseUrl: URL;
+  try {
+    baseUrl = new URL(base);
+  } catch {
+    return "";
+  }
+  try {
+    return new URL(rel, baseUrl).href;
+  } catch {
+    return baseUrl.href;
+  }
+}
+
+const documentBaseUris = new WeakMap<CheerioAPI, string>();
+
+/**
+ * The base URI of the document a node belongs to: the URL it was parsed with
+ * (kept in cheerio's options, not as an attribute), overridden by the first
+ * `<base href>` that resolves against it, as SwiftSoup's tree builder does.
+ */
+function getBaseUri(node: CheerioWithApi): string {
+  const $ = node._cheerioApi;
+  if (!$) {
+    const parsed = node.options?.baseURI;
+    return parsed ? String(parsed) : "";
+  }
+  const cached = documentBaseUris.get($);
+  if (cached !== undefined) return cached;
+
+  const parsed = $._options.baseURI;
+  let baseUri = parsed ? String(parsed) : "";
+  for (const el of $("base[href]").toArray()) {
+    const href = resolveUrl(baseUri, $(el).attr("href") ?? "");
+    if (href) {
+      baseUri = href;
+      break;
+    }
+  }
+  documentBaseUris.set($, baseUri);
+  return baseUri;
+}
+
 // Helper to attach API reference to a Cheerio object
 function attachApi(target: Cheerio<AnyNode>, source: CheerioWithApi): CheerioWithApi {
   const result = target as CheerioWithApi;
@@ -316,25 +377,8 @@ export function createHtmlImports(store: GlobalStore) {
         let value = node.first().attr(attr);
         if (value === undefined) return HtmlError.NoResult;
 
-        if (makeAbsolute && value) {
-          // Try to get base URI from the cheerio API
-          const $ = node._cheerioApi;
-          const baseUri = $?.root().attr("baseURI") || "";
-
-          if (
-            baseUri &&
-            !value.startsWith("http://") &&
-            !value.startsWith("https://") &&
-            !value.startsWith("//")
-          ) {
-            try {
-              value = new URL(value, baseUri).toString();
-            } catch {
-              // Keep original value if URL resolution fails
-            }
-          } else if (value.startsWith("//")) {
-            value = "https:" + value;
-          }
+        if (makeAbsolute) {
+          value = resolveUrl(getBaseUri(node), value);
         }
 
         return store.storeStdValue(value);
@@ -506,9 +550,7 @@ export function createHtmlImports(store: GlobalStore) {
       if (descriptor < 0) return HtmlError.InvalidDescriptor;
       const node = getNode(store, descriptor);
       if (!node) return HtmlError.InvalidDescriptor;
-      const $ = node._cheerioApi;
-      const baseUri = $?.root().attr("baseURI") || "";
-      return store.storeStdValue(baseUri);
+      return store.storeStdValue(getBaseUri(node));
     },
 
     own_text: (descriptor: number): number => {
