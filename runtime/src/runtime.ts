@@ -38,6 +38,7 @@ import {
   type SettingsGetter,
   type SettingsSetter,
 } from "./imports";
+import { BROWSER_USER_AGENT, getRequestUserAgent } from "./imports/net";
 import { extractAix, isAixPackage, type AixContents } from "./aix";
 
 // Canvas module types for injection
@@ -1136,8 +1137,7 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
       context?: Record<string, string> | null
     ): { url: string; headers: Record<string, string> } {
       const defaultHeaders: Record<string, string> = {
-        "User-Agent":
-          "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+        "User-Agent": BROWSER_USER_AGENT,
       };
       const storedCookies = store.getCookiesForUrl(url);
       if (storedCookies) {
@@ -1220,9 +1220,14 @@ export function createLoadSource(defaultCanvasModule: CanvasModule) {
         const request = store.requests.get(requestId);
 
         if (request) {
+          // Source requests carry no default User-Agent; image requests keep
+          // the browser one unless the source set its own.
+          const headers = request.headers || {};
           const result = {
             url: request.url || url,
-            headers: request.headers || {},
+            headers: getRequestUserAgent(headers) === undefined
+              ? { "User-Agent": BROWSER_USER_AGENT, ...headers }
+              : headers,
           };
           store.removeRequest(requestId);
           return result;

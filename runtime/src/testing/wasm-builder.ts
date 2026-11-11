@@ -78,6 +78,8 @@ export const op = {
   localGet: (index: number) => [0x20, ...uleb(index)],
   localSet: (index: number) => [0x21, ...uleb(index)],
   drop: () => [0x1a],
+  i32Shl: () => [0x74],
+  i32Store8: (offset: number) => [0x3a, 0x00, ...uleb(offset)],
 };
 
 /** Frame a result payload the way aidoku-rs does: [i32 len][i32 cap][payload]. */

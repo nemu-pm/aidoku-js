@@ -89,6 +89,12 @@ const source = await loadSource(aixBytes, "my-source", {
 `isCloudflareChallengeResponse(status, headers, body?)` is exported for hosts
 that do their own HTTP.
 
+Source requests carry only the User-Agent the source sets; without one, the
+HTTP client's default goes out. A challenge on such a request reports the
+runtime's browser User-Agent instead, and later requests to that host without a
+source User-Agent send it, so a solver should clear the challenge with the
+reported `userAgent`. Image requests default to the browser User-Agent.
+
 ## Unsupported imports
 
 Webviews are not available, so these `js` imports exist for instantiation only

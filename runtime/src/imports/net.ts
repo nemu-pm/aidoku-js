@@ -69,7 +69,7 @@ export class CloudflareBlockedError extends Error {
 }
 
 /** Read the User-Agent from request headers regardless of casing. */
-function getRequestUserAgent(headers: Record<string, string>): string | undefined {
+export function getRequestUserAgent(headers: Record<string, string>): string | undefined {
   for (const [key, value] of Object.entries(headers)) {
     if (key.toLowerCase() === "user-agent") {
       return value;
@@ -78,8 +78,17 @@ function getRequestUserAgent(headers: Record<string, string>): string | undefine
   return undefined;
 }
 
-// Default User-Agent for requests
-const DEFAULT_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
+/**
+ * Browser User-Agent for hosts that have served a Cloudflare challenge, and the
+ * default for image requests.
+ *
+ * Source requests carry no User-Agent of their own unless the source sets one,
+ * so the HTTP client's default goes out: some APIs (MangaDex's auth server)
+ * send browser UAs to a bot challenge. A clearance cookie is bound to the UA it
+ * was issued for, so a challenge reports this UA when the source set none, and
+ * later requests to that host without a source UA send it.
+ */
+export const BROWSER_USER_AGENT ="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 
 export interface NetImportOptions {
   /**
@@ -96,12 +105,21 @@ export function createNetImports(
   options: NetImportOptions = {}
 ) {
   const isLegacyAbi = options.isLegacyAbi ?? (() => false);
+  // Hosts that challenged a request without a source User-Agent; theirs get
+  // BROWSER_USER_AGENT so retries match the UA the clearance was issued for.
+  const challengedHosts = new Set<string>();
 
   const send = (descriptor: number): number => {
     if (descriptor < 0) return RequestError.InvalidDescriptor;
     const req = store.requests.get(descriptor);
     if (!req) return RequestError.InvalidDescriptor;
     if (!req.url) return RequestError.MissingUrl;
+
+    const sourceUserAgent = getRequestUserAgent(req.headers);
+    const host = hostFromUrl(req.url);
+    if (sourceUserAgent === undefined && challengedHosts.has(host)) {
+      req.headers["User-Agent"] = BROWSER_USER_AGENT;
+    }
 
     // Add stored cookies for this URL
     const storedCookies = store.getCookiesForUrl(req.url);
@@ -148,8 +166,10 @@ export function createNetImports(
       // A challenge is only retryable once the body confirms it, so detection
       // needs the response data.
       if (isCloudflareChallengeResponse(response.status, responseHeaders, data)) {
+        if (sourceUserAgent === undefined) challengedHosts.add(host);
         throw new CloudflareBlockedError(req.url, response.status, {
-          userAgent: getRequestUserAgent(req.headers),
+          host,
+          userAgent: sourceUserAgent ?? BROWSER_USER_AGENT,
         });
       }
 
@@ -178,15 +198,7 @@ export function createNetImports(
   };
 
   return {
-    init: (method: number): number => {
-      const id = store.createRequest(method);
-      // Add default User-Agent like reference runner
-      const req = store.requests.get(id);
-      if (req) {
-        req.headers["User-Agent"] = DEFAULT_USER_AGENT;
-      }
-      return id;
-    },
+    init: (method: number): number => store.createRequest(method),
 
     send,
 
